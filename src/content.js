@@ -58,6 +58,9 @@
   let isAdPlaying = false;
   let position = null;            // { left, bottom }
   let playerEl = null;
+  let saveTimer = null;
+
+  const CACHE_PREFIX = "ytbs_cache_";
 
   // ============================== 启动 ==============================
   boot();
@@ -228,6 +231,9 @@
     cueList = cues;
     LOG(`已加载 ${cueList.length} 条字幕`);
 
+    await loadPersistentCache(videoId);
+    if (token !== loadToken) return;
+
     createOverlay();
     applyStyles();
     applyNativeVisibility();
@@ -396,6 +402,75 @@
     return config.translator + "|" + config.targetLang + "|" + text;
   }
 
+  // ---- 持久化缓存（存 chrome.storage.local，按视频 + 引擎 + 目标语言隔离）----
+  function persistentKey(videoId) {
+    return CACHE_PREFIX + videoId;
+  }
+
+  function loadPersistentCache(videoId) {
+    return new Promise((resolve) => {
+      try {
+        const key = persistentKey(videoId);
+        chrome.storage.local.get([key], (r) => {
+          const entry = r && r[key];
+          if (
+            entry &&
+            entry.lang === config.targetLang &&
+            entry.translator === config.translator &&
+            entry.map
+          ) {
+            let n = 0;
+            for (const text in entry.map) {
+              if (!translationCache.has(cacheKey(text))) {
+                translationCache.set(cacheKey(text), entry.map[text]);
+                n++;
+              }
+            }
+            LOG(`已从本地缓存加载 ${n} 条翻译`);
+          }
+          resolve();
+        });
+      } catch (e) {
+        resolve();
+      }
+    });
+  }
+
+  function scheduleSavePersistent() {
+    if (!currentVideoId) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(savePersistentNow, 1500);
+  }
+
+  function savePersistentNow() {
+    if (!currentVideoId || !cueList.length) return;
+    const map = {};
+    let count = 0;
+    for (const c of cueList) {
+      const tr = translationCache.get(cacheKey(c.text));
+      if (tr) {
+        map[c.text] = tr;
+        count++;
+        if (count >= 4000) break; // 单视频上限，避免存储过大
+      }
+    }
+    if (!count) return;
+    const key = persistentKey(currentVideoId);
+    try {
+      chrome.storage.local.set({
+        [key]: {
+          lang: config.targetLang,
+          translator: config.translator,
+          updatedAt: Date.now(),
+          map,
+        },
+      });
+      LOG(`已保存 ${count} 条翻译到本地缓存`);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
   async function ensureTranslations() {
     if (!cueList.length || !config.enabled) return;
     const token = loadToken;
@@ -449,6 +524,7 @@
       done += chunk.length;
       if (statusEl) statusEl.textContent = "翻译中… " + done + "/" + pending.length;
       renderCue(lastIndex, true);
+      scheduleSavePersistent();
       await sleep(120);
     }
 
@@ -459,6 +535,7 @@
       }, 1500);
     }
     renderCue(lastIndex, true);
+    savePersistentNow();
   }
 
   function sendBg(type, payload) {

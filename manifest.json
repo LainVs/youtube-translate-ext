@@ -3,7 +3,7 @@
   "name": "YouTube 双语字幕翻译",
   "version": "0.1.0",
   "description": "在 YouTube 上显示原文 + 译文双语字幕，支持原文/译文各自自定义字体颜色与字号。",
-  "permissions": ["storage"],
+  "permissions": ["storage", "unlimitedStorage"],
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://translate.googleapis.com/*",

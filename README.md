@@ -49,11 +49,13 @@
 youtube-translate-ext/
 ├── manifest.json              # MV3 配置
 ├── src/
-│   ├── content.js             # 字幕获取 + 渲染 + 同步（核心）
+│   ├── content.js             # 字幕获取 + 渲染 + 同步 + 导出（核心）
 │   ├── content.css            # 字幕层样式
 │   ├── background.js          # 翻译请求（Google / AI）
 │   ├── popup.html/js/css      # 设置面板
 │   └── icons/                 # 扩展图标
+├── bridge/                    # OpenCode → OpenAI 兼容 桥接服务
+├── preview/ui-preview.html    # UI 预览
 ├── scripts/generate-icons.ps1 # 图标生成脚本
 └── research/                  # 竞品调研 + 参考源码
 ```
@@ -64,6 +66,14 @@ youtube-translate-ext/
 - **AI 翻译**：任何 OpenAI 兼容的 `/chat/completions` 接口。填写 Base URL、API Key、模型即可，
   也可以指向本地的 opencode / 自建网关，例如 `http://localhost:xxxx/v1`。
   AI 翻译更懂上下文、更口语化，但需要自备 Key。
+- **接入 OpenCode**：OpenCode 原生 API 是会话式的，不兼容 `/chat/completions`。
+  本项目在 [`bridge/`](bridge/) 提供了一个几十行的桥接服务，把 OpenCode 的一次性生成接口
+  `POST /api/experimental/generate` 包装成 OpenAI 格式，扩展即可直接使用。详见 [bridge/README.md](bridge/README.md)。
+
+## 持久化翻译缓存
+
+- 翻译结果按「视频 + 引擎 + 目标语言」缓存在 `chrome.storage.local`。
+- 同一视频再次打开时直接命中缓存，无需重新翻译。
 
 ## 已知限制 / 后续可做
 

@@ -1,0 +1,13 @@
+{
+  "name": "opencode-translate-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把 OpenCode 的一次性生成接口包装成 OpenAI 兼容的 /v1/chat/completions，供浏览器扩展直接调用。",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@opencode/client": "latest"
+  }
+}
