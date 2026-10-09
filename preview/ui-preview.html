@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>YouTube 双语字幕 — UI 预览</title>
+    <link rel="stylesheet" href="../src/popup.css" />
+    <link rel="stylesheet" href="../src/content.css" />
+    <style>
+      body {
+        width: auto;
+        margin: 0;
+        padding: 28px;
+        background: #101014;
+        color: #e8e8e8;
+        font-family: "Microsoft YaHei", system-ui, sans-serif;
+        display: flex;
+        gap: 32px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+      .panel-title {
+        font-size: 13px;
+        color: #8a8a90;
+        margin: 0 0 10px;
+        letter-spacing: 0.5px;
+      }
+      .popup-mock {
+        width: 340px;
+        background: #1c1c1f;
+        border: 1px solid #2d2d31;
+        border-radius: 12px;
+        padding: 0 14px 14px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+      }
+      .player-mock {
+        position: relative;
+        width: 640px;
+        height: 360px;
+        border-radius: 12px;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 30% 20%, #2a2a35, #121216 70%),
+          #121216;
+        border: 1px solid #2d2d31;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+      }
+      .player-mock .fake-video-label {
+        position: absolute;
+        top: 16px;
+        left: 16px;
+        font-size: 12px;
+        color: #6a6a72;
+      }
+      .player-mock .fake-controls {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 42px;
+        background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+      }
+      .player-mock .fake-progress {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: 14px;
+        height: 3px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.25);
+      }
+      .player-mock .fake-progress::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 38%;
+        height: 100%;
+        border-radius: 2px;
+        background: #ff0000;
+      }
+      /* 预览用：字幕层改成静态定位，不跟随真实播放器逻辑 */
+      .player-mock #ytbs-wrapper {
+        left: 50%;
+        bottom: 84px;
+        transform: translateX(-50%);
+      }
+      .player-mock #ytbs-handle,
+      .player-mock #ytbs-download {
+        opacity: 1;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 11px;
+        color: #9be89b;
+        border: 1px solid #2f4a2f;
+        background: #16240f;
+        padding: 1px 6px;
+        border-radius: 6px;
+        margin-left: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      <p class="panel-title">① 设置面板 <span class="badge">popup</span></p>
+      <div class="popup-mock">
+        <header>
+          <h1>YouTube 双语字幕</h1>
+          <span class="ver">v0.1.0</span>
+        </header>
+
+        <section>
+          <label class="row"><span>启用翻译</span><input type="checkbox" class="switch" checked /></label>
+          <label class="row"><span>双语显示（原文 + 译文）</span><input type="checkbox" class="switch" checked /></label>
+          <label class="row"><span>隐藏 YouTube 原生字幕</span><input type="checkbox" class="switch" /></label>
+        </section>
+
+        <section>
+          <div class="title">目标语言</div>
+          <select>
+            <option>简体中文</option>
+          </select>
+          <div class="title">原字幕语言</div>
+          <select>
+            <option>自动选择</option>
+          </select>
+        </section>
+
+        <section>
+          <div class="title">翻译引擎</div>
+          <select>
+            <option>AI 翻译（OpenAI 兼容接口）</option>
+          </select>
+          <div class="ai-box">
+            <label class="col"><span>接口地址 Base URL</span><input type="text" value="http://localhost:8000/v1" /></label>
+            <label class="col"><span>API Key</span><input type="password" value="sk-opencode" /></label>
+            <label class="col"><span>模型</span><input type="text" value="big-pickle" /></label>
+          </div>
+        </section>
+
+        <section>
+          <div class="title">样式</div>
+          <div class="grid2">
+            <label class="col"><span>原文字体颜色</span><input type="color" value="#ffffff" /></label>
+            <label class="col"><span>译文字体颜色</span><input type="color" value="#a7e8ff" /></label>
+          </div>
+          <div class="grid2">
+            <label class="col"><span>原文字号 <b>18</b>px</span><input type="range" min="12" max="40" value="18" /></label>
+            <label class="col"><span>译文字号 <b>24</b>px</span><input type="range" min="12" max="48" value="24" /></label>
+          </div>
+          <label class="col"><span>整体缩放比例 <b>1.0</b>×</span><input type="range" min="0.5" max="2" step="0.1" value="1" /></label>
+        </section>
+
+        <section>
+          <div class="title">导出字幕文件</div>
+          <div class="grid2">
+            <label class="col">
+              <span>格式</span>
+              <select>
+                <option>SRT 字幕</option>
+              </select>
+            </label>
+            <label class="col">
+              <span>内容</span>
+              <select>
+                <option>双语（原文+译文）</option>
+              </select>
+            </label>
+          </div>
+          <button class="primary" style="width: 100%">导出当前视频字幕</button>
+          <span class="saved show" style="display: block; text-align: center; margin-top: 6px">已导出 128 条 ✓</span>
+        </section>
+
+        <footer>
+          <button>恢复默认</button>
+          <span class="saved show">已保存</span>
+        </footer>
+      </div>
+    </div>
+
+    <div>
+      <p class="panel-title">② 播放器上的双语字幕 <span class="badge">overlay</span></p>
+      <div class="player-mock">
+        <div class="fake-video-label">▶ 模拟 YouTube 播放器（16:9）</div>
+        <div id="ytbs-wrapper">
+          <div id="ytbs-box">
+            <div id="ytbs-handle">⠿</div>
+            <div id="ytbs-download">⤓</div>
+            <div class="ytbs-line ytbs-original" style="color: #ffffff; font-size: 18px">
+              And that is how a transformer pays attention.
+            </div>
+            <div class="ytbs-line ytbs-translated" style="color: #a7e8ff; font-size: 24px">
+              这就是 Transformer 注意力的工作方式。
+            </div>
+          </div>
+        </div>
+        <div class="fake-controls"></div>
+        <div class="fake-progress"></div>
+      </div>
+      <p style="max-width: 640px; color: #8a8a90; font-size: 12px; line-height: 1.7">
+        左上角 ⠿ 是拖拽手柄（悬停显示）。原文、译文颜色与字号均由面板独立控制，
+        整体缩放比例会在此基础上统一放大/缩小。字幕框在广告期间自动隐藏。
+      </p>
+    </div>
+  </body>
+</html>

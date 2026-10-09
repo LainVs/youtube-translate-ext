@@ -89,6 +89,30 @@
       </label>
     </section>
 
+    <section>
+      <div class="title">导出字幕文件</div>
+      <div class="grid2">
+        <label class="col">
+          <span>格式</span>
+          <select id="exportFormat">
+            <option value="srt">SRT 字幕</option>
+            <option value="vtt">VTT 字幕</option>
+            <option value="txt">纯文本 TXT</option>
+          </select>
+        </label>
+        <label class="col">
+          <span>内容</span>
+          <select id="exportMode">
+            <option value="bilingual">双语（原文+译文）</option>
+            <option value="translation">仅译文</option>
+            <option value="original">仅原文</option>
+          </select>
+        </label>
+      </div>
+      <button id="exportBtn" class="primary" style="width: 100%">导出当前视频字幕</button>
+      <span id="exportMsg" class="saved" style="display: block; text-align: center; margin-top: 6px"></span>
+    </section>
+
     <footer>
       <button id="reset">恢复默认</button>
       <span id="saved" class="saved"></span>

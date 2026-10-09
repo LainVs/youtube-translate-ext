@@ -30,6 +30,9 @@
     originalSize: 18,
     translatedSize: 24,
     fontScale: 1,
+    // 导出
+    exportFormat: "srt", // srt | vtt | txt
+    exportMode: "bilingual", // bilingual | translation | original
     // 选定的原始字幕语言（空 = 自动）
     trackLang: "",
   };
@@ -58,6 +61,28 @@
 
   // ============================== 启动 ==============================
   boot();
+
+  // ============================== 与 popup 通信 ==============================
+  try {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!msg) return;
+      if (msg.type === "EXPORT_SUBTITLES") {
+        const res = exportSubtitles(msg.format || config.exportFormat, msg.mode || config.exportMode);
+        sendResponse(res);
+        return;
+      }
+      if (msg.type === "GET_STATUS") {
+        sendResponse({
+          loaded: cueList.length,
+          translated: countTranslated(),
+          videoId: currentVideoId,
+        });
+        return;
+      }
+    });
+  } catch (e) {
+    /* ignore */
+  }
 
   async function boot() {
     await loadConfig();
@@ -473,6 +498,17 @@
     handle.textContent = "⠿";
     handle.title = "拖动调整位置";
 
+    const downloadBtn = document.createElement("div");
+    downloadBtn.id = "ytbs-download";
+    downloadBtn.textContent = "⤓";
+    downloadBtn.title = "导出字幕文件";
+    downloadBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const res = exportSubtitles(config.exportFormat, config.exportMode);
+      if (!res.ok) LOG(res.error);
+    });
+
     originalEl = document.createElement("div");
     originalEl.className = "ytbs-line ytbs-original";
 
@@ -484,6 +520,7 @@
     statusEl.style.display = "none";
 
     box.appendChild(handle);
+    box.appendChild(downloadBtn);
     box.appendChild(originalEl);
     box.appendChild(translatedEl);
     box.appendChild(statusEl);
@@ -678,6 +715,105 @@
         /* ignore */
       }
     }
+  }
+
+  // ============================== 导出字幕 ==============================
+  function countTranslated() {
+    let n = 0;
+    for (const c of cueList) {
+      if (translationCache.has(cacheKey(c.text))) n++;
+    }
+    return n;
+  }
+
+  function exportSubtitles(format, mode) {
+    if (!cueList.length) {
+      return { ok: false, error: "字幕尚未加载完成，请稍候重试" };
+    }
+    format = format || "srt";
+    mode = mode || "bilingual";
+
+    const content = buildSubtitleContent(format, mode);
+    const base = sanitizeName(document.title || "youtube") + "_" + modeLabel(mode);
+    const ext = format === "txt" ? "txt" : format;
+    const filename = base + "." + ext;
+
+    try {
+      triggerDownload(filename, content);
+      LOG("已导出字幕:", filename);
+      return { ok: true, count: cueList.length, filename };
+    } catch (e) {
+      return { ok: false, error: "导出失败: " + e.message };
+    }
+  }
+
+  function modeLabel(mode) {
+    return mode === "translation" ? "译文" : mode === "original" ? "原文" : "双语";
+  }
+
+  function buildSubtitleContent(format, mode) {
+    const bodyOf = (cue) => {
+      const tr = translationCache.get(cacheKey(cue.text));
+      if (mode === "original") return cue.text;
+      if (mode === "translation") return tr || cue.text;
+      // 双语：有译文则两行，没有则只显示原文
+      return tr ? cue.text + "\n" + tr : cue.text;
+    };
+
+    if (format === "txt") {
+      return cueList.map((c) => bodyOf(c)).join("\n");
+    }
+
+    if (format === "vtt") {
+      const parts = ["WEBVTT", ""];
+      for (const c of cueList) {
+        parts.push(formatTime(c.start, false) + " --> " + formatTime(c.end, false));
+        parts.push(bodyOf(c));
+        parts.push("");
+      }
+      return parts.join("\n");
+    }
+
+    // 默认 SRT
+    const parts = [];
+    for (let i = 0; i < cueList.length; i++) {
+      const c = cueList[i];
+      parts.push(String(i + 1));
+      parts.push(formatTime(c.start, true) + " --> " + formatTime(c.end, true));
+      parts.push(bodyOf(c));
+      parts.push("");
+    }
+    return parts.join("\n");
+  }
+
+  function formatTime(ms, comma) {
+    ms = Math.max(0, Math.round(ms || 0));
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    const msec = ms % 1000;
+    const pad = (n, l) => String(n).padStart(l, "0");
+    return pad(h, 2) + ":" + pad(m, 2) + ":" + pad(s, 2) + (comma ? "," : ".") + pad(msec, 3);
+  }
+
+  function sanitizeName(name) {
+    return String(name).replace(/[\\/:*?"<>|\n\r\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "youtube";
+  }
+
+  function triggerDownload(filename, content) {
+    // 加 BOM，保证 Windows 记事本正确识别 UTF-8
+    const blob = new Blob(["\uFEFF" + content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      a.remove();
+    }, 1000);
   }
 
   // ============================== 清理 ==============================

@@ -44,6 +44,33 @@
   opacity: 1;
 }
 
+#ytbs-download {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 22px;
+  height: 22px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  user-select: none;
+}
+
+#ytbs-download:hover {
+  background: #4a8cff;
+}
+
+#ytbs-wrapper:hover #ytbs-download {
+  opacity: 1;
+}
+
 .ytbs-line {
   display: block;
   line-height: 1.35;

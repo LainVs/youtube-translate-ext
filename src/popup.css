@@ -165,6 +165,17 @@ button:hover {
   background: #303036;
 }
 
+button.primary {
+  background: #4a8cff;
+  border-color: #4a8cff;
+  color: #fff;
+  font-weight: 600;
+}
+
+button.primary:hover {
+  background: #3d7bef;
+}
+
 .saved {
   font-size: 12px;
   color: #7bd88f;

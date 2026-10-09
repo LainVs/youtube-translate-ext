@@ -14,6 +14,8 @@ const DEFAULTS = {
   originalSize: 18,
   translatedSize: 24,
   fontScale: 1,
+  exportFormat: "srt",
+  exportMode: "bilingual",
   trackLang: "",
 };
 
@@ -83,6 +85,16 @@ function save(patch) {
   });
 }
 
+function showExportMsg(text, isError) {
+  const el = $("exportMsg");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isError ? "#ff8b8b" : "#7bd88f";
+  el.classList.add("show");
+  clearTimeout(showExportMsg._t);
+  showExportMsg._t = setTimeout(() => el.classList.remove("show"), 2500);
+}
+
 function updateAiBox() {
   const isAi = $("translator").value === "ai";
   $("aiBox").classList.toggle("hidden", !isAi);
@@ -105,6 +117,8 @@ function bindEvents() {
     "translator",
     "originalColor",
     "translatedColor",
+    "exportFormat",
+    "exportMode",
   ].forEach((id) => {
     $(id).addEventListener("change", () => {
       const el = $(id);
@@ -124,6 +138,36 @@ function bindEvents() {
     $(id).addEventListener("input", () => {
       updateLabels();
       save({ [id]: Number($(id).value) });
+    });
+  });
+
+  // 导出
+  $("exportBtn").addEventListener("click", () => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id) {
+        showExportMsg("未找到标签页", true);
+        return;
+      }
+      chrome.tabs.sendMessage(
+        tab.id,
+        {
+          type: "EXPORT_SUBTITLES",
+          format: $("exportFormat").value,
+          mode: $("exportMode").value,
+        },
+        (res) => {
+          if (chrome.runtime.lastError) {
+            showExportMsg("请在 YouTube 视频页使用", true);
+            return;
+          }
+          if (res && res.ok) {
+            showExportMsg("已导出 " + res.count + " 条 ✓");
+          } else {
+            showExportMsg((res && res.error) || "导出失败", true);
+          }
+        }
+      );
     });
   });
 
