@@ -67,9 +67,12 @@ youtube-translate-ext/
   也可以指向本地的 opencode / 自建网关，例如 `http://localhost:xxxx/v1`。
   AI 翻译更懂上下文、更口语化，但需要自备 Key。
 - **接入 OpenCode**：OpenCode 原生 API 是会话式的，不兼容 `/chat/completions`。
-  本项目在 [`bridge/`](bridge/) 提供了一个几十行的桥接服务，把 OpenCode 的一次性生成接口
-  `POST /api/experimental/generate` 包装成 OpenAI 格式，扩展即可直接使用。详见 [bridge/README.md](bridge/README.md)。
-  AI 引擎的默认配置即为 `http://localhost:8788/v1` + `opencode/big-pickle`。
+  本项目在 [`bridge/`](bridge/) 提供了一个零依赖的桥接服务，内部调用本机 OpenCode CLI
+  （`opencode run --format json`）并包装成 OpenAI 格式。**注意**：OpenCode 免费模型（含
+  `opencode/big-pickle`）在 HTTP `POST /api/experimental/generate` 上会被拒
+  （"free tier can only be used from within OpenCode"），但命令行 `opencode run` 属于内部调用，可用。
+  详见 [bridge/README.md](bridge/README.md)。AI 引擎的默认配置即为
+  `http://localhost:8788/v1` + `opencode/big-pickle`。
 
 ## 持久化翻译缓存
 
@@ -81,4 +84,4 @@ youtube-translate-ext/
 - 部分视频的 `timedtext` 链接需要 PO token，可能返回空字幕（YouTube 风控变化）。
   后续可增加 innertube ANDROID client 兜底，或降级为“监听原生字幕 DOM”模式。
 - 目前字幕按“整条”翻译，超长视频首次翻译需要一点时间（有进度提示）。
-- 后续可选：按视频持久化翻译缓存、自动检测原字幕语言。
+- 后续可选：自动检测原字幕语言。
