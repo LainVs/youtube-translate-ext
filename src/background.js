@@ -32,7 +32,89 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((err) => sendResponse({ error: err.message || String(err) }));
     return true; // 异步响应，保持通道开启
   }
+  if (msg && msg.type === "GET_TRACKS") {
+    getTracks(msg.videoId)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message || String(err) }));
+    return true;
+  }
+  if (msg && msg.type === "GET_CUES") {
+    getCueBody(msg.baseUrl)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message || String(err) }));
+    return true;
+  }
 });
+
+/* ===================== 字幕获取（放 background，绕开页面 CORS/隔离环境） ===================== */
+
+// 公开的 InnerTube key；ANDROID 客户端的字幕轨道 URL 不带 PoToken 风控
+const INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+const ANDROID_CLIENT_VERSION = "20.10.38";
+
+/** 用 ANDROID InnerTube 客户端取字幕轨道 */
+async function getTracks(videoId) {
+  if (!videoId) return { error: "缺少 videoId", tracks: [] };
+  const version = ANDROID_CLIENT_VERSION;
+  const body = {
+    context: {
+      client: {
+        clientName: "ANDROID",
+        clientVersion: version,
+        androidSdkVersion: 30,
+        hl: "en",
+        gl: "US",
+        userAgent: "com.google.android.youtube/" + version + " (Linux; U; Android 11) gzip",
+      },
+    },
+    videoId: videoId,
+    contentCheckOk: true,
+    racyCheckOk: true,
+  };
+  const resp = await fetch(
+    "https://www.youtube.com/youtubei/v1/player?key=" + encodeURIComponent(INNERTUBE_KEY) + "&prettyPrint=false",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-YouTube-Client-Name": "3",
+        "X-YouTube-Client-Version": version,
+      },
+      body: JSON.stringify(body),
+    }
+  );
+  const txt = await resp.text();
+  if (!resp.ok) return { error: "innertube HTTP " + resp.status + " " + txt.slice(0, 160), tracks: [] };
+  let j;
+  try {
+    j = JSON.parse(txt);
+  } catch (e) {
+    return { error: "innertube 返回非 JSON", tracks: [] };
+  }
+  const tracks =
+    (j.captions &&
+      j.captions.playerCaptionsTracklistRenderer &&
+      j.captions.playerCaptionsTracklistRenderer.captionTracks) ||
+    [];
+  return { source: "android", tracks };
+}
+
+/** 按 baseUrl 取字幕正文（覆盖 fmt=json3） */
+async function getCueBody(baseUrl) {
+  if (!baseUrl) return { error: "缺少 baseUrl" };
+  let url;
+  try {
+    const u = new URL(baseUrl);
+    u.searchParams.set("fmt", "json3");
+    url = u.toString();
+  } catch (e) {
+    url = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
+  }
+  const resp = await fetch(url);
+  if (!resp.ok) return { error: "字幕正文 HTTP " + resp.status };
+  const body = await resp.text();
+  return { body: body };
+}
 
 async function translateBatch(texts, cfg) {
   if (!Array.isArray(texts) || texts.length === 0) return [];

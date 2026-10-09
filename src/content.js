@@ -42,6 +42,8 @@
   // ============================== 运行时状态 ==============================
   let currentVideoId = null;
   let loadToken = 0;
+  let lastError = "";
+  let lastSource = "";
 
   let cueList = [];               // [{ start, end, dur, text }]
   const translationCache = new Map(); // cacheKey -> 译文
@@ -62,11 +64,6 @@
 
   const CACHE_PREFIX = "ytbs_cache_";
 
-  // InnerTube：用 ANDROID 客户端取字幕轨道。页面里的 baseUrl 现在带 &exp=xpe，
-  // 直接 fetch 会被 PoToken 风控返回 200 空 body；ANDROID 客户端的字幕 URL 不受此限制。
-  const INNERTUBE_KEY_FALLBACK = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-  const ANDROID_CLIENT_VERSION = "20.10.38";
-
   // ============================== 启动 ==============================
   boot();
 
@@ -84,6 +81,9 @@
           loaded: cueList.length,
           translated: countTranslated(),
           videoId: currentVideoId,
+          source: lastSource,
+          error: lastError,
+          trackLang: config.trackLang || "",
         });
         return;
       }
@@ -214,35 +214,60 @@
     await waitForPlayer();
     if (token !== loadToken) return;
 
-    // 优先用 ANDROID InnerTube 客户端取字幕轨道（绕开页面 baseUrl 的 PoToken 风控）
+    // 取字幕轨道：优先走 background 的 ANDROID InnerTube 客户端
+    // （页面里的 baseUrl 现在带 &exp=xpe，被 PoToken 风控，直接 fetch 返回 200 空 body）
+    lastError = "";
+    lastSource = "";
     let tracks = [];
     try {
-      tracks = await fetchCaptionTracksAndroid(videoId);
+      const r = await sendBg("GET_TRACKS", { videoId });
+      if (r && r.error) lastError = r.error;
+      tracks = (r && r.tracks) || [];
+      if (tracks.length) lastSource = r.source || "android";
     } catch (e) {
-      LOG("ANDROID 取字幕轨道失败:", e.message);
+      lastError = String((e && e.message) || e);
+      LOG("ANDROID 取字幕轨道失败:", lastError);
     }
 
     if (!tracks || tracks.length === 0) {
       // 兜底：页面 ytInitialPlayerResponse
       const playerResponse = await getPlayerResponse();
       if (token !== loadToken) return;
-      tracks = extractTracks(playerResponse) || [];
+      const pageTracks = extractTracks(playerResponse) || [];
+      if (pageTracks.length) {
+        tracks = pageTracks;
+        lastSource = "page";
+      }
     }
 
     if (!tracks || tracks.length === 0) {
       LOG("该视频没有可用字幕轨道");
-      showToast("该视频没有可用字幕轨道（需要视频本身带 CC 字幕）", true);
+      showToast("该视频没有可用字幕轨道" + (lastError ? "（" + lastError + "）" : "（需要视频本身带 CC 字幕）"), true);
       return;
     }
 
     const track = pickTrack(tracks);
     if (!track) return;
 
-    const cues = await fetchCues(track.baseUrl);
+    // 取字幕正文：同样优先走 background
+    let cues = [];
+    try {
+      const r = await sendBg("GET_CUES", { baseUrl: track.baseUrl });
+      if (r && r.error) lastError = r.error;
+      if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
+    } catch (e) {
+      lastError = String((e && e.message) || e);
+    }
+    if (!cues.length) {
+      cues = await fetchCues(track.baseUrl); // 内容脚本直连兜底
+    }
     if (token !== loadToken) return;
     if (!cues.length) {
-      LOG("字幕内容为空");
-      showToast("字幕内容为空：可能被 YouTube 风控拦截（需要 PO token）", true);
+      LOG("字幕内容为空, 来源=" + lastSource + ", 错误=" + lastError);
+      showToast(
+        "字幕内容为空（来源 " + (lastSource || "?") + "）" + (lastError ? "：" + lastError : ""),
+        true
+      );
       return;
     }
 
@@ -342,64 +367,6 @@
     return null;
   }
 
-  /** 从页面脚本里找 InnerTube API Key（找不到就用公开 key） */
-  function getInnertubeKey() {
-    try {
-      const scripts = document.querySelectorAll("script");
-      for (const s of scripts) {
-        const t = s.textContent;
-        if (!t || t.indexOf("INNERTUBE_API_KEY") === -1) continue;
-        const m = t.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
-        if (m && m[1]) return m[1];
-      }
-    } catch (e) {
-      /* ignore */
-    }
-    return INNERTUBE_KEY_FALLBACK;
-  }
-
-  /** 用 ANDROID InnerTube 客户端拿字幕轨道（其 baseUrl 不带 PoToken 风控） */
-  async function fetchCaptionTracksAndroid(videoId) {
-    const key = getInnertubeKey();
-    const version = ANDROID_CLIENT_VERSION;
-    const body = {
-      context: {
-        client: {
-          clientName: "ANDROID",
-          clientVersion: version,
-          androidSdkVersion: 30,
-          hl: "en",
-          gl: "US",
-          userAgent: "com.google.android.youtube/" + version + " (Linux; U; Android 11) gzip",
-        },
-      },
-      videoId: videoId,
-      contentCheckOk: true,
-      racyCheckOk: true,
-    };
-
-    const resp = await fetch(
-      "https://www.youtube.com/youtubei/v1/player?key=" + encodeURIComponent(key) + "&prettyPrint=false",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "X-YouTube-Client-Name": "3",
-          "X-YouTube-Client-Version": version,
-        },
-        body: JSON.stringify(body),
-      }
-    );
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const j = await resp.json();
-    return (
-      (j.captions &&
-        j.captions.playerCaptionsTracklistRenderer &&
-        j.captions.playerCaptionsTracklistRenderer.captionTracks) ||
-      []
-    );
-  }
-
   function extractTracks(playerResponse) {
     if (!playerResponse) return null;
     return (
@@ -461,10 +428,13 @@
       LOG("字幕响应为空或无法解析，长度:", body ? body.length : 0);
       return [];
     }
+    return finalizeCues(cues);
+  }
 
+  /** 排序 + 计算结束时间 + 合并相邻重复 */
+  function finalizeCues(cues) {
+    if (!cues.length) return [];
     cues.sort((a, b) => a.start - b.start);
-
-    // 计算结束时间，并合并相邻完全相同的文本
     const merged = [];
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];

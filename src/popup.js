@@ -235,8 +235,12 @@ function bindEvents() {
       if (!tab || !tab.id) return showStatusMsg("未找到标签页", true);
       chrome.tabs.sendMessage(tab.id, { type: "GET_STATUS" }, (res) => {
         if (chrome.runtime.lastError) return showStatusMsg("请在 YouTube 视频页使用", true);
-        if (res) showStatusMsg("已加载 " + res.loaded + " 条 / 已翻译 " + res.translated + " 条");
-        else showStatusMsg("无返回", true);
+        if (res) {
+          let msg = "已加载 " + res.loaded + " 条 / 已翻译 " + res.translated + " 条";
+          if (res.source) msg += "（来源 " + res.source + "）";
+          if (res.error) msg += " 错误：" + res.error;
+          showStatusMsg(msg, !!res.error || res.loaded === 0);
+        } else showStatusMsg("无返回", true);
       });
     });
   });
