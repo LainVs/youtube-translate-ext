@@ -95,3 +95,28 @@
   opacity: 0.85;
   font-family: system-ui, sans-serif;
 }
+
+/* 页面内提示条：字幕轨道缺失 / 拉取失败 / 翻译失败 等 */
+#ytbs-toast {
+  position: absolute;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  z-index: 61;
+  max-width: 80%;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(20, 20, 22, 0.92);
+  color: #e8e8e8;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+}
+
+#ytbs-toast.ytbs-toast-error {
+  background: rgba(120, 30, 30, 0.94);
+  color: #ffe3e3;
+}

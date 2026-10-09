@@ -28,18 +28,26 @@
 1. 点击工具栏扩展图标打开设置面板
 2. 选择目标语言、翻译引擎、字幕样式（颜色 / 字号 / 缩放）
 3. 回到视频页，字幕会自动出现
+4. 若“没反应”：点扩展图标 →「诊断」→ 分别用 **测试翻译** 和 **检查当前页字幕状态**
+   看是字幕没取到还是翻译失败（页面上也会弹出提示条说明原因）
 
 ## 工作原理
 
 ```
-① 取字幕轨道   页面 script 中的 ytInitialPlayerResponse
+① 取字幕轨道   优先用 ANDROID InnerTube 客户端 POST /youtubei/v1/player
                → captions.playerCaptionsTracklistRenderer.captionTracks
-② 取字幕内容   baseUrl + "&fmt=json3" → fetch → events[]（带时间轴）
+               （页面里的 ytInitialPlayerResponse 作兜底）
+② 取字幕内容   覆盖 baseUrl 的 fmt=json3 → fetch → events[]（带时间轴）
+               解析 json3，或 srv3/srv1 XML
 ③ 翻译         content.js 批量发给 background.js
                → Google 免费端点 / AI 接口 → 结果写缓存
 ④ 渲染         player 内注入 #ytbs-wrapper 双语字幕层
 ⑤ 同步         setInterval(100ms) 读取 video.currentTime，二分查找当前字幕
 ```
+
+> ⚠️ **为什么必须走 ANDROID 客户端**：YouTube 现在给页面 `captionTracks[].baseUrl` 加了
+> `&exp=xpe` 并启用 PoToken 风控，直接 fetch 会返回 **HTTP 200 + 空 body**（静默失败，不报错）。
+> ANDROID 客户端的字幕 URL 不带该风控，可以正常取到内容。
 
 详细调研见 [`research/FINDINGS.md`](research/FINDINGS.md)。
 
@@ -81,7 +89,8 @@ youtube-translate-ext/
 
 ## 已知限制 / 后续可做
 
-- 部分视频的 `timedtext` 链接需要 PO token，可能返回空字幕（YouTube 风控变化）。
-  后续可增加 innertube ANDROID client 兜底，或降级为“监听原生字幕 DOM”模式。
+- 字幕获取走 ANDROID InnerTube 客户端（客户端版本 `20.10.38`，写在 `content.js` 里）。
+  YouTube 若调整客户端版本或风控策略，可能需要更新该版本号；页面 `baseUrl` 直接取字幕已基本不可用。
+- 若取不到字幕/翻译失败，页面会出现提示条（否则是静默失败）。
 - 目前字幕按“整条”翻译，超长视频首次翻译需要一点时间（有进度提示）。
 - 后续可选：自动检测原字幕语言。

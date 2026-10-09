@@ -62,6 +62,11 @@
 
   const CACHE_PREFIX = "ytbs_cache_";
 
+  // InnerTube：用 ANDROID 客户端取字幕轨道。页面里的 baseUrl 现在带 &exp=xpe，
+  // 直接 fetch 会被 PoToken 风控返回 200 空 body；ANDROID 客户端的字幕 URL 不受此限制。
+  const INNERTUBE_KEY_FALLBACK = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+  const ANDROID_CLIENT_VERSION = "20.10.38";
+
   // ============================== 启动 ==============================
   boot();
 
@@ -209,12 +214,24 @@
     await waitForPlayer();
     if (token !== loadToken) return;
 
-    const playerResponse = await getPlayerResponse();
-    if (token !== loadToken) return;
+    // 优先用 ANDROID InnerTube 客户端取字幕轨道（绕开页面 baseUrl 的 PoToken 风控）
+    let tracks = [];
+    try {
+      tracks = await fetchCaptionTracksAndroid(videoId);
+    } catch (e) {
+      LOG("ANDROID 取字幕轨道失败:", e.message);
+    }
 
-    const tracks = extractTracks(playerResponse);
+    if (!tracks || tracks.length === 0) {
+      // 兜底：页面 ytInitialPlayerResponse
+      const playerResponse = await getPlayerResponse();
+      if (token !== loadToken) return;
+      tracks = extractTracks(playerResponse) || [];
+    }
+
     if (!tracks || tracks.length === 0) {
       LOG("该视频没有可用字幕轨道");
+      showToast("该视频没有可用字幕轨道（需要视频本身带 CC 字幕）", true);
       return;
     }
 
@@ -225,6 +242,7 @@
     if (token !== loadToken) return;
     if (!cues.length) {
       LOG("字幕内容为空");
+      showToast("字幕内容为空：可能被 YouTube 风控拦截（需要 PO token）", true);
       return;
     }
 
@@ -324,6 +342,64 @@
     return null;
   }
 
+  /** 从页面脚本里找 InnerTube API Key（找不到就用公开 key） */
+  function getInnertubeKey() {
+    try {
+      const scripts = document.querySelectorAll("script");
+      for (const s of scripts) {
+        const t = s.textContent;
+        if (!t || t.indexOf("INNERTUBE_API_KEY") === -1) continue;
+        const m = t.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
+        if (m && m[1]) return m[1];
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return INNERTUBE_KEY_FALLBACK;
+  }
+
+  /** 用 ANDROID InnerTube 客户端拿字幕轨道（其 baseUrl 不带 PoToken 风控） */
+  async function fetchCaptionTracksAndroid(videoId) {
+    const key = getInnertubeKey();
+    const version = ANDROID_CLIENT_VERSION;
+    const body = {
+      context: {
+        client: {
+          clientName: "ANDROID",
+          clientVersion: version,
+          androidSdkVersion: 30,
+          hl: "en",
+          gl: "US",
+          userAgent: "com.google.android.youtube/" + version + " (Linux; U; Android 11) gzip",
+        },
+      },
+      videoId: videoId,
+      contentCheckOk: true,
+      racyCheckOk: true,
+    };
+
+    const resp = await fetch(
+      "https://www.youtube.com/youtubei/v1/player?key=" + encodeURIComponent(key) + "&prettyPrint=false",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-YouTube-Client-Name": "3",
+          "X-YouTube-Client-Version": version,
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const j = await resp.json();
+    return (
+      (j.captions &&
+        j.captions.playerCaptionsTracklistRenderer &&
+        j.captions.playerCaptionsTracklistRenderer.captionTracks) ||
+      []
+    );
+  }
+
   function extractTracks(playerResponse) {
     if (!playerResponse) return null;
     return (
@@ -359,24 +435,31 @@
 
   async function fetchCues(baseUrl) {
     if (!baseUrl) return [];
-    const url = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
-    let data;
+    // 用 URL API 覆盖 fmt：ANDROID 轨道的 baseUrl 默认带 fmt=srv3，
+    // 直接拼 &fmt=json3 会变成两个 fmt，结果仍是 srv3 XML。
+    let url;
+    try {
+      const u = new URL(baseUrl);
+      u.searchParams.set("fmt", "json3");
+      url = u.toString();
+    } catch (e) {
+      url = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
+    }
+
+    let body;
     try {
       const resp = await fetch(url, { credentials: "include" });
       if (!resp.ok) throw new Error("HTTP " + resp.status);
-      data = await resp.json();
+      body = await resp.text();
     } catch (e) {
       LOG("拉取字幕失败:", e.message);
       return [];
     }
 
-    const cues = [];
-    for (const ev of data.events || []) {
-      if (!ev.segs) continue;
-      let text = ev.segs.map((s) => s.utf8 || "").join("");
-      text = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-      if (!text) continue;
-      cues.push({ start: ev.tStartMs || 0, dur: ev.dDurationMs || 0, text });
+    const cues = parseCuesFromBody(body);
+    if (!cues.length) {
+      LOG("字幕响应为空或无法解析，长度:", body ? body.length : 0);
+      return [];
     }
 
     cues.sort((a, b) => a.start - b.start);
@@ -395,6 +478,66 @@
       merged.push({ start: c.start, end: Math.max(end, c.start + 300), dur: c.dur, text: c.text });
     }
     return merged;
+  }
+
+  /** 解析 timedtext 响应：json3（JSON）或 srv3 / srv1（XML） */
+  function parseCuesFromBody(body) {
+    const cues = [];
+    if (!body) return cues;
+    const text = body.replace(/^\s*\)\]\}'\s*/, "").trim(); // 去掉 XSSI 前缀
+    if (text.charAt(0) === "{") {
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        return cues;
+      }
+      for (const ev of data.events || []) {
+        if (!ev.segs) continue;
+        let line = ev.segs.map((s) => s.utf8 || "").join("");
+        line = line.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+        if (!line) continue;
+        cues.push({ start: ev.tStartMs || 0, dur: ev.dDurationMs || 0, text: line });
+      }
+      return cues;
+    }
+    if (text.charAt(0) === "<") {
+      // srv3: <p t="1360" d="1680">text</p>
+      let m;
+      const reP = /<p\s+[^>]*\bt="(\d+)"[^>]*\bd="(\d+)"[^>]*>([\s\S]*?)<\/p>/g;
+      while ((m = reP.exec(text))) {
+        const line = cleanXmlText(m[3]);
+        if (line) cues.push({ start: +m[1], dur: +m[2], text: line });
+      }
+      if (!cues.length) {
+        // srv1: <text start="1.36" dur="1.68">text</text>
+        const reT = /<text\s+[^>]*\bstart="([\d.]+)"[^>]*\bdur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
+        while ((m = reT.exec(text))) {
+          const line = cleanXmlText(m[3]);
+          if (line) cues.push({ start: Math.round(+m[1] * 1000), dur: Math.round(+m[2] * 1000), text: line });
+        }
+      }
+    }
+    return cues;
+  }
+
+  function cleanXmlText(s) {
+    return decodeEntities(String(s).replace(/<[^>]*>/g, ""))
+      .replace(/\n/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function decodeEntities(s) {
+    return s
+      .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d))
+      .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, " ");
   }
 
   // ============================== 翻译 ==============================
@@ -518,6 +661,7 @@
       } else if (res && res.error) {
         LOG("翻译错误:", res.error);
         if (statusEl) statusEl.textContent = "翻译失败：" + res.error;
+        showToast("翻译失败：" + res.error, true);
         await sleep(800);
       }
 
@@ -916,6 +1060,33 @@
 
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /** 页面内提示条：让“静默失败”变成可见原因 */
+  function showToast(text, isError) {
+    try {
+      const host =
+        (playerEl && playerEl.isConnected ? playerEl : null) ||
+        document.querySelector("#movie_player") ||
+        document.querySelector(".html5-video-player") ||
+        document.body;
+      if (!host) return;
+      let el = document.getElementById("ytbs-toast");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "ytbs-toast";
+      }
+      if (el.parentNode !== host) host.appendChild(el);
+      el.textContent = text;
+      el.className = isError ? "ytbs-toast-error" : "";
+      el.style.display = "block";
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => {
+        el.style.display = "none";
+      }, isError ? 6000 : 3000);
+    } catch (e) {
+      /* ignore */
+    }
   }
 
   function LOG() {

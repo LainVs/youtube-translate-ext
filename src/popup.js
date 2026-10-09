@@ -41,7 +41,15 @@ const TRACK_LANGS = [["", "自动选择"]] .concat(TARGET_LANGS);
 
 const $ = (id) => document.getElementById(id);
 
-document.addEventListener("DOMContentLoaded", async () => {
+document.addEventListener("DOMContentLoaded", () => {
+  try {
+    init();
+  } catch (e) {
+    showFatal(e);
+  }
+});
+
+async function init() {
   fillSelect($("targetLang"), TARGET_LANGS);
   fillSelect($("trackLang"), TRACK_LANGS);
 
@@ -56,7 +64,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   updateAiBox();
   updateLabels();
   bindEvents();
-});
+}
+
+function showFatal(e) {
+  const el = $("fatal");
+  if (!el) return;
+  el.style.display = "block";
+  el.textContent = "设置面板加载出错：" + (e && (e.stack || e.message || e));
+}
 
 function fillSelect(sel, list) {
   sel.innerHTML = "";
@@ -93,6 +108,22 @@ function showExportMsg(text, isError) {
   el.classList.add("show");
   clearTimeout(showExportMsg._t);
   showExportMsg._t = setTimeout(() => el.classList.remove("show"), 2500);
+}
+
+function showTestMsg(text, isError) {
+  const el = $("testMsg");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isError ? "#ff8b8b" : "#7bd88f";
+  el.classList.add("show");
+}
+
+function showStatusMsg(text, isError) {
+  const el = $("statusMsg");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isError ? "#ff8b8b" : "#7bd88f";
+  el.classList.add("show");
 }
 
 function updateAiBox() {
@@ -168,6 +199,45 @@ function bindEvents() {
           }
         }
       );
+    });
+  });
+
+  // 诊断：用当前引擎翻译一句话
+  $("testBtn").addEventListener("click", () => {
+    const cfg = {
+      translator: $("translator").value,
+      targetLang: $("targetLang").value,
+      aiBaseUrl: $("aiBaseUrl").value,
+      aiApiKey: $("aiApiKey").value,
+      aiModel: $("aiModel").value,
+    };
+    showTestMsg("测试中…");
+    chrome.runtime.sendMessage(
+      { type: "TRANSLATE_BATCH", texts: ["Hello, world."], config: cfg },
+      (res) => {
+        if (chrome.runtime.lastError) {
+          showTestMsg("失败：" + chrome.runtime.lastError.message, true);
+          return;
+        }
+        if (res && Array.isArray(res.translations) && res.translations.length) {
+          showTestMsg("成功：" + res.translations[0]);
+        } else {
+          showTestMsg("失败：" + ((res && res.error) || "无返回"), true);
+        }
+      }
+    );
+  });
+
+  // 诊断：当前页字幕加载/翻译情况
+  $("statusBtn").addEventListener("click", () => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id) return showStatusMsg("未找到标签页", true);
+      chrome.tabs.sendMessage(tab.id, { type: "GET_STATUS" }, (res) => {
+        if (chrome.runtime.lastError) return showStatusMsg("请在 YouTube 视频页使用", true);
+        if (res) showStatusMsg("已加载 " + res.loaded + " 条 / 已翻译 " + res.translated + " 条");
+        else showStatusMsg("无返回", true);
+      });
     });
   });
 

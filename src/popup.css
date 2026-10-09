@@ -186,3 +186,15 @@ button.primary:hover {
 .saved.show {
   opacity: 1;
 }
+
+.fatal {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #3a1e1e;
+  border: 1px solid #6b2b2b;
+  color: #ffb3b3;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

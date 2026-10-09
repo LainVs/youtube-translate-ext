@@ -9,8 +9,10 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.1.0</span>
+      <span class="ver">v0.2.0</span>
     </header>
+
+    <div id="fatal" class="fatal" style="display: none"></div>
 
     <section>
       <label class="row">
@@ -111,6 +113,14 @@
       </div>
       <button id="exportBtn" class="primary" style="width: 100%">导出当前视频字幕</button>
       <span id="exportMsg" class="saved" style="display: block; text-align: center; margin-top: 6px"></span>
+    </section>
+
+    <section>
+      <div class="title">诊断</div>
+      <button id="testBtn" style="width: 100%">测试翻译（用当前引擎翻译一句话）</button>
+      <span id="testMsg" class="saved" style="display: block; text-align: center; margin-top: 6px"></span>
+      <button id="statusBtn" style="width: 100%; margin-top: 6px">检查当前页字幕状态</button>
+      <span id="statusMsg" class="saved" style="display: block; text-align: center; margin-top: 6px"></span>
     </section>
 
     <footer>
