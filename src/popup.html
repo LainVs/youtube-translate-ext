@@ -9,7 +9,7 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.5.0</span>
+      <span class="ver">v0.5.1</span>
     </header>
 
     <div id="fatal" class="fatal" style="display: none"></div>
@@ -32,6 +32,12 @@
           智能合并字幕成完整句
         </span>
         <input type="checkbox" id="mergeBySentence" class="switch" />
+      </label>
+      <label class="row">
+        <span title="YouTube 的自动字幕是滚动窗口式的，会用 >> 标记新增内容。开启后只显示最后一个 >> 之后的新句子，避免整条滚动历史挤成一长串。">
+          只显示最新字幕片段
+        </span>
+        <input type="checkbox" id="domKeepLatest" class="switch" />
       </label>
     </section>
 

@@ -13,6 +13,7 @@ const DEFAULTS = {
   mergeBySentence: true,
   mergeMaxChars: 160,
   mergeMaxGapMs: 1200,
+  domKeepLatest: true,
   originalColor: "#39ff6a",
   translatedColor: "#ffe14d",
   originalSize: 30,
@@ -268,6 +269,7 @@ function bindEvents() {
     "exportFormat",
     "exportMode",
     "mergeBySentence",
+    "domKeepLatest",
     "originalWeight",
     "translatedWeight",
   ].forEach((id) => {

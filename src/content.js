@@ -52,6 +52,9 @@
     mergeBySentence: true,
     mergeMaxChars: 160,
     mergeMaxGapMs: 1200,
+    // DOM 实时模式：只显示 ASR 滚动字幕里"最后一个 >> 之后"的新内容，
+    // 否则会把整条滚动历史（可能上百字符）连同 >> 标记一起显示出来。
+    domKeepLatest: true,
   };
 
   let config = Object.assign({}, DEFAULTS);
@@ -1088,6 +1091,34 @@
     return v ? Math.round(v.currentTime * 1000) : Date.now();
   }
 
+  /**
+   * YouTube 的 ASR（自动生成）字幕是「滚动窗口」式的：随着语音识别推进，
+   * 同一行会不断往前追加新内容，并用 ">>" 打头标记**新增部分的起点**。
+   *
+   * 实测（用户在视频里看到的真实画面）：
+   *   屏幕上原文 = "I didn't understand it then, but >> [music] >>
+   *                I think some part of me just knew before I did."
+   *   如果照单全收地拼接，就会显示成一长串 117 字符的巨型字幕，
+   *   而且把 ">>" 这种标记也一起显示出来（截图里那行就是这么来的）。
+   *
+   * 正确做法：按 ">>" 切开，**只取最后一个非空段**—— 那才是当前
+   * 正在说的新内容。同一段实测从 117 字符缩到 47 字符，缩短 60%，
+   * 正好就是竞品那种「一句一句跟着说」的效果。
+   */
+  function pickLatestSegment(text) {
+    const raw = String(text || "");
+    if (raw.indexOf(">>") < 0) return raw.replace(/\s+/g, " ").trim();
+    const parts = raw.split(">>");
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const t = parts[i].replace(/\s+/g, " ").trim();
+      if (t) return t;
+    }
+    // 全是空白分段（纯 ">>"），退回去掉标记的原文，
+    // 避免字幕里出现裸的 ">>"，也不至于整体消失
+    const cleaned = raw.replace(/>>/g, "").replace(/\s+/g, " ").trim();
+    return cleaned;
+  }
+
   function readNativeCaption() {
     try {
       const win = document.querySelector(".ytp-caption-window-container");
@@ -1102,7 +1133,8 @@
       } else {
         text = (win.innerText || win.textContent || "").replace(/\s+/g, " ").trim();
       }
-      return text;
+      // 只保留 ">>" 之后的最新片段（ASR 滚动字幕专用）
+      return config.domKeepLatest ? pickLatestSegment(text) : text;
     } catch (e) {
       return "";
     }
