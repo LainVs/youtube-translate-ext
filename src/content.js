@@ -680,7 +680,8 @@
   window.addEventListener("message", (e) => {
     if (e.source !== window) return;
     const d = e.data;
-    if (!d || d[MAIN_TAG] !== true || !d.id) return;
+    // 只接受主世界的响应；必须过滤掉自己刚发出去的请求（postMessage 会回送给自己）
+    if (!d || d[MAIN_TAG] !== true || d.from !== "main" || !d.id) return;
     const resolve = mainPending.get(d.id);
     if (!resolve) return;
     mainPending.delete(d.id);

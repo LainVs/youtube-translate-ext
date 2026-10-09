@@ -110,6 +110,6 @@
     } catch (err) {
       result = { error: String((err && err.message) || err) };
     }
-    post({ id: d.id, result: result });
+    post({ id: d.id, from: "main", result: result });
   });
 })();
