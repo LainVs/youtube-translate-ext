@@ -111,18 +111,23 @@ button.preset.active {
   color: #ffd633;
 }
 
-/* 无框大字：透明底 + 强描边 */
-.pv-nobg i {
-  text-shadow: -0.5px -0.5px 0 #000, 0.5px -0.5px 0 #000, -0.5px 0.5px 0 #000, 0.5px 0.5px 0 #000;
+/* 每张预设卡里的迷你预览，直接模拟字幕压在画面上的样子 */
+
+/* 霓虹：透明底 + 强描边 */
+.pv-neon i {
+  text-shadow: -0.5px -0.5px 0 #000, 0.5px -0.5px 0 #000, -0.5px 0.5px 0 #000, 0.5px 0.5px 0 #000,
+    -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;
 }
-.pv-nobg .o {
+.pv-neon .o {
+  color: #39ff6a;
   font-size: 9px;
 }
-.pv-nobg .t {
+.pv-neon .t {
+  color: #ffe14d;
   font-size: 10px;
 }
 
-/* 影院黑底：圆角黑框 */
+/* 影院：圆角黑底 */
 .pv-cinema {
   padding: 4px 8px;
 }
@@ -133,40 +138,89 @@ button.preset.active {
   text-shadow: none;
 }
 .pv-cinema .o {
-  font-size: 8px;
-}
-.pv-cinema .t {
-  font-size: 9px;
-}
-
-/* 护眼柔和：无框中性色 + 强描边 */
-.pv-soft i {
-  text-shadow: -0.5px -0.5px 0 #000, 0.5px -0.5px 0 #000, -0.5px 0.5px 0 #000, 0.5px 0.5px 0 #000;
-}
-.pv-soft .o {
-  color: #f0f0f0;
-  font-size: 9px;
-}
-.pv-soft .t {
-  color: #ffc94d;
-  font-size: 10px;
-}
-
-/* 磨砂浮层：半透明深底 + 圆角 + 柔和阴影 */
-.pv-frost {
-  background: linear-gradient(160deg, #4a5a6a, #2a3542);
-}
-.pv-frost > i {
-  background: rgba(16, 16, 20, 0.5);
-  border-radius: 5px;
-  padding: 1px 7px;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
-}
-.pv-frost .o {
   color: #fff;
   font-size: 8px;
 }
-.pv-frost .t {
+.pv-cinema .t {
+  color: #7fe3ff;
+  font-size: 9px;
+}
+
+/* 纸感：浅底深字 */
+.pv-paper {
+  background: #cfc6b4;
+}
+.pv-paper > i {
+  background: rgba(245, 240, 230, 0.82);
+  border-radius: 3px;
+  padding: 1px 6px;
+  text-shadow: none;
+}
+.pv-paper .o {
+  color: #1a1a1a;
+  font-size: 8px;
+}
+.pv-paper .t {
+  color: #c1440e;
+  font-size: 9px;
+}
+
+/* 琥珀：暖色底 */
+.pv-amber {
+  background: #4a3620;
+}
+.pv-amber > i {
+  background: rgba(42, 28, 14, 0.55);
+  border-radius: 5px;
+  padding: 1px 6px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+.pv-amber .o {
+  color: #fff4d6;
+  font-size: 8px;
+}
+.pv-amber .t {
+  color: #ffa62b;
+  font-size: 9px;
+}
+
+/* 深海：藏青底 */
+.pv-ocean {
+  background: #12304d;
+}
+.pv-ocean > i {
+  background: rgba(10, 26, 47, 0.58);
+  border-radius: 4px;
+  padding: 1px 6px;
+  text-shadow: none;
+}
+.pv-ocean .o {
+  color: #fff;
+  font-size: 8px;
+}
+.pv-ocean .t {
+  color: #6ec6ff;
+  font-size: 9px;
+}
+
+/* 极简：纯黑白 */
+.pv-noir {
+  background: #000;
+}
+.pv-noir > i {
+  background: rgba(0, 0, 0, 0.78);
+  border-radius: 2px;
+  padding: 1px 6px;
+  text-shadow: none;
+}
+.pv-noir .o {
+  color: #f2f2f2;
+  font-weight: 400;
+  font-size: 8px;
+}
+.pv-noir .t {
+  color: #fff;
+  font-weight: 700;
   font-size: 9px;
 }
 

@@ -9,7 +9,7 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.3.2</span>
+      <span class="ver">v0.5.0</span>
     </header>
 
     <div id="fatal" class="fatal" style="display: none"></div>
@@ -26,6 +26,12 @@
       <label class="row">
         <span>隐藏 YouTube 原生字幕</span>
         <input type="checkbox" id="hideNative" class="switch" />
+      </label>
+      <label class="row">
+        <span title="YouTube 自动字幕每条只有半句话，逐条翻译会得到断头断尾的译文。开启后先拼成完整句再翻。">
+          智能合并字幕成完整句
+        </span>
+        <input type="checkbox" id="mergeBySentence" class="switch" />
       </label>
     </section>
 
@@ -61,34 +67,56 @@
     </section>
 
     <section>
-      <div class="title">风格预设<span class="hint">点一下就套用，不用自己调</span></div>
+      <div class="title">风格预设<span class="hint">只改配色和背景，不动你的字号</span></div>
 
       <div class="presets" id="presets">
-        <button class="preset" data-preset="nobg">
-          <span class="pv pv-nobg"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">无框大字</span>
-          <span class="pd">透明底 + 强描边，最清爽</span>
+        <button class="preset" data-preset="neon">
+          <span class="pv pv-neon"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">霓虹</span>
+          <span class="pd">亮绿+亮黄，透明底强描边</span>
         </button>
         <button class="preset" data-preset="cinema">
           <span class="pv pv-cinema"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">影院黑底</span>
-          <span class="pd">圆角黑框，稳、对比强</span>
+          <span class="pn">影院</span>
+          <span class="pd">白字+青色，圆角黑底</span>
         </button>
-        <button class="preset" data-preset="soft">
-          <span class="pv pv-soft"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">护眼柔和</span>
-          <span class="pd">无框中性色，久看不累</span>
+        <button class="preset" data-preset="paper">
+          <span class="pv pv-paper"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">纸感</span>
+          <span class="pd">浅色底，亮画面友好</span>
         </button>
-        <button class="preset" data-preset="frost">
-          <span class="pv pv-frost"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">磨砂浮层</span>
-          <span class="pd">半透明底，背景乱时用</span>
+        <button class="preset" data-preset="amber">
+          <span class="pv pv-amber"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">琥珀</span>
+          <span class="pd">米白+琥珀，暖色不刺眼</span>
+        </button>
+        <button class="preset" data-preset="ocean">
+          <span class="pv pv-ocean"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">深海</span>
+          <span class="pd">白字+天蓝，藏青底</span>
+        </button>
+        <button class="preset" data-preset="noir">
+          <span class="pv pv-noir"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">极简</span>
+          <span class="pd">纯黑白，靠字号区分两行</span>
         </button>
       </div>
     </section>
 
     <section>
       <div class="title">样式微调</div>
+
+      <label class="col">
+        <span>字体</span>
+        <select id="fontFamily">
+          <option value="common">最通用 Arial + 微软雅黑</option>
+          <option value="segoe">Segoe UI（Windows 现代）</option>
+          <option value="yahei">微软雅黑（中文最工整）</option>
+          <option value="songti">Georgia + 宋体（衬线，正式）</option>
+          <option value="mono">Consolas 等宽（技术内容）</option>
+          <option value="round">Trebuchet MS（圆润）</option>
+        </select>
+      </label>
 
       <div class="grid2">
         <label class="col">
@@ -147,6 +175,23 @@
           <option value="2">强描边（无底色必备）</option>
         </select>
       </label>
+
+      <div class="grid2">
+        <label class="col">
+          <span title="中文字体没有 500/600 中间字重，选中文字体会被浏览器合成加粗（笔画变粗发毛）。建议保持常规。">原文字重</span>
+          <select id="originalWeight">
+            <option value="400">常规（推荐）</option>
+            <option value="700">加粗</option>
+          </select>
+        </label>
+        <label class="col">
+          <span title="同上：中文只用 400 / 700，避免伪粗体。">译文字重</span>
+          <select id="translatedWeight">
+            <option value="400">常规（推荐）</option>
+            <option value="700">加粗</option>
+          </select>
+        </label>
+      </div>
     </section>
 
     <section>

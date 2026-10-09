@@ -9,82 +9,104 @@ const DEFAULTS = {
   aiBaseUrl: "http://localhost:8788/v1",
   aiApiKey: "",
   aiModel: "opencode/big-pickle",
-  originalColor: "#2ee62e",
-  translatedColor: "#ffd633",
-  originalSize: 32,
-  translatedSize: 34,
+  fontFamily: "common",
+  mergeBySentence: true,
+  mergeMaxChars: 160,
+  mergeMaxGapMs: 1200,
+  originalColor: "#39ff6a",
+  translatedColor: "#ffe14d",
+  originalSize: 30,
+  translatedSize: 26,
   fontScale: 1,
+  originalWeight: 400,
+  translatedWeight: 400,
   bgColor: "#000000",
   bgOpacity: 0,
   boxRadius: 0,
   boxPadding: 0,
   outline: 2,
-  stylePreset: "nobg",
+  stylePreset: "neon",
   exportFormat: "srt",
   exportMode: "bilingual",
   trackLang: "",
 };
 
 /**
- * 风格预设：一键套用，用户不需要碰任何取色器/滑块。
- * 每项只覆盖样式键，不碰启用/语言/翻译引擎等。
+ * 风格预设：一键套用配色和背景。
+ *
+ * ⚠️刻意不包含 originalSize / translatedSize / fontScale / fontFamily。
+ * 字号和字体是用户自己的偏好，预设一旦覆盖就会被「锁死」——
+ * 之前版本就是因为预设里带了字号，导致点了预设后字号改不动。
+ * 所以预设只管「长什么样」，不管「多大、用什么字」。
  */
 const PRESETS = {
-  // 无框大字：透明底 + 强描边，靠描边在任意画面上保持可读（用户偏好的样式）
-  nobg: {
-    originalColor: "#2ee62e",
-    translatedColor: "#ffd633",
-    originalSize: 32,
-    translatedSize: 34,
-    fontScale: 1,
+  neon: {
+    // 霓虹：亮绿+亮黄，透明底+强描边，任何画面都跳出来
+    originalColor: "#39ff6a",
+    translatedColor: "#ffe14d",
     bgColor: "#000000",
     bgOpacity: 0,
     boxRadius: 0,
     boxPadding: 0,
     outline: 2,
   },
-  // 影院黑底：圆角黑框，对比最强，背景再乱也稳
   cinema: {
-    originalColor: "#2ee62e",
-    translatedColor: "#ffd633",
-    originalSize: 20,
-    translatedSize: 26,
-    fontScale: 1,
+    // 影院：白字+青色，圆角黑底，对比最强
+    originalColor: "#ffffff",
+    translatedColor: "#7fe3ff",
     bgColor: "#000000",
     bgOpacity: 62,
     boxRadius: 10,
     boxPadding: 10,
     outline: 0,
   },
-  // 护眼柔和：无框但用中性白/暖黄，久看不刺眼
-  soft: {
-    originalColor: "#f0f0f0",
-    translatedColor: "#ffc94d",
-    originalSize: 30,
-    translatedSize: 32,
-    fontScale: 1,
-    bgColor: "#000000",
-    bgOpacity: 0,
-    boxRadius: 0,
-    boxPadding: 0,
-    outline: 2,
+  paper: {
+    // 纸感：米白底+墨色字+砖红译文，浅色/雪景画面友好
+    originalColor: "#1a1a1a",
+    translatedColor: "#c1440e",
+    bgColor: "#f5f0e6",
+    bgOpacity: 82,
+    boxRadius: 6,
+    boxPadding: 8,
+    outline: 0,
   },
-  // 磨砂浮层：半透明深色底，浅色/复杂背景下最稳
-  frost: {
-    originalColor: "#ffffff",
-    translatedColor: "#ffd633",
-    originalSize: 22,
-    translatedSize: 28,
-    fontScale: 1,
-    bgColor: "#101014",
-    bgOpacity: 50,
-    boxRadius: 14,
-    boxPadding: 14,
+  amber: {
+    // 琥珀：暖色系，久看不刺眼
+    originalColor: "#fff4d6",
+    translatedColor: "#ffa62b",
+    bgColor: "#2a1c0e",
+    bgOpacity: 55,
+    boxRadius: 12,
+    boxPadding: 10,
     outline: 1,
+  },
+  ocean: {
+    // 深海：白字+天蓝，沉稳
+    originalColor: "#ffffff",
+    translatedColor: "#6ec6ff",
+    bgColor: "#0a1a2f",
+    bgOpacity: 58,
+    boxRadius: 10,
+    boxPadding: 10,
+    outline: 0,
+  },
+  noir: {
+    // 极简：纯黑白，靠字号和粗细区分两行
+    originalColor: "#f2f2f2",
+    translatedColor: "#ffffff",
+    bgColor: "#000000",
+    bgOpacity: 78,
+    boxRadius: 4,
+    boxPadding: 8,
+    outline: 0,
   },
 };
 
-const PRESET_KEYS = Object.keys(PRESETS.nobg);
+/** 预设只覆盖这些键——注意不含任何字号/字体键 */
+const PRESET_KEYS = Object.keys(PRESETS.neon);
+
+/** 手动微调后需要取消预设高亮的键 */
+const STYLE_KEYS = PRESET_KEYS.concat(["outline"]);
 
 const TARGET_LANGS = [
   ["zh-CN", "简体中文"],
@@ -215,20 +237,18 @@ function markPreset(name) {
   });
 }
 
-/** 一键套用预设：写控件 → 存盘 → 立刻预览高亮 */
+/** 一键套用预设：写控件 → 存盘 → 立刻预览高亮。不会碰字号和字体。 */
 async function applyPreset(name) {
   const p = PRESETS[name];
   if (!p) return;
-  const patch = Object.assign({}, p);
   PRESET_KEYS.forEach((k) => {
     const el = $(k);
-    if (el) el.value = patch[k];
+    if (el) el.value = p[k];
   });
-  // outline 是 select，也要同步
-  $("outline").value = String(patch.outline);
+  $("outline").value = String(p.outline);
   updateLabels();
   markPreset(name);
-  await save(Object.assign({ stylePreset: name }, patch));
+  await save(Object.assign({ stylePreset: name }, p));
 }
 
 function bindEvents() {
@@ -244,14 +264,18 @@ function bindEvents() {
     "translatedColor",
     "bgColor",
     "outline",
+    "fontFamily",
     "exportFormat",
     "exportMode",
+    "mergeBySentence",
+    "originalWeight",
+    "translatedWeight",
   ].forEach((id) => {
     $(id).addEventListener("change", () => {
       const el = $(id);
       const value = el.type === "checkbox" ? el.checked : el.value;
       // 手动改样式就不再高亮预设（提示「你已经在预设之外微调了」）
-      if (PRESET_KEYS.includes(id) || id === "outline") markPreset(null);
+      if (id !== "fontFamily" && STYLE_KEYS.includes(id)) markPreset(null);
       save({ [id]: value });
       if (id === "translator") updateAiBox();
     });
@@ -266,7 +290,7 @@ function bindEvents() {
   ["originalSize", "translatedSize", "fontScale", "bgOpacity", "boxRadius", "boxPadding"].forEach((id) => {
     $(id).addEventListener("input", () => {
       updateLabels();
-      if (PRESET_KEYS.includes(id)) markPreset(null);
+      // 字号是用户自己的偏好，改它不应该取消预设高亮
       save({ [id]: Number($(id).value) });
     });
   });

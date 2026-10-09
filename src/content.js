@@ -25,11 +25,16 @@
     aiApiKey: "",
     aiModel: "opencode/big-pickle",
     // 样式
-    originalColor: "#2ee62e",
-    translatedColor: "#ffd633",
-    originalSize: 32,
-    translatedSize: 34,
+    // 字体：只存 key，实际字体栈见 FONT_STACKS
+    fontFamily: "common",
+    originalColor: "#39ff6a",
+    translatedColor: "#ffe14d",
+    originalSize: 30,
+    translatedSize: 26,
     fontScale: 1,
+    // 字重：中文只用 400/700（详见 fixCJKWeight 的注释）
+    originalWeight: 400,
+    translatedWeight: 400,
     // 字幕背景
     bgColor: "#000000",
     bgOpacity: 0,
@@ -38,12 +43,15 @@
     // 文字描边强度：0 无 / 1 柔和阴影 / 2 强描边（无底色时靠它保证可读）
     outline: 2,
     // 当前套用的风格预设（仅用于面板高亮）
-    stylePreset: "nobg",
+    stylePreset: "neon",
     // 导出
     exportFormat: "srt", // srt | vtt | txt
     exportMode: "bilingual", // bilingual | translation | original
     // 选定的原始字幕语言（空 = 自动）
     trackLang: "",
+    mergeBySentence: true,
+    mergeMaxChars: 160,
+    mergeMaxGapMs: 1200,
   };
 
   let config = Object.assign({}, DEFAULTS);
@@ -80,6 +88,26 @@
   let saveTimer = null;
 
   const CACHE_PREFIX = "ytbs_cache_";
+
+  /**
+   * 字体栈。每个栈都**同时给拉丁字形和中文字形安排了字体**，
+   * 所以一行里英中文各自取到合适的那个，不会出现「英文一种字体、
+   * 中文掉到后备字体」的割裂感。
+   * 注意：不要用 "YouTube Sans" —— 它没有中文字形，会造成中英割裂。
+   */
+  const FONT_STACKS = {
+    common: 'Arial, Helvetica, "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif',
+    segoe: '"Segoe UI", "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif',
+    // 微软雅黑优先给中文，但拉丁字形也给它（它自带西文字形，比掉到 sans-serif 更协调）
+    yahei: '"Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB", sans-serif',
+    songti: 'Georgia, "SimSun", "宋体", "Microsoft YaHei", serif',
+    mono: 'Consolas, "Cascadia Mono", "Microsoft YaHei", "微软雅黑", monospace',
+    round: '"Trebuchet MS", Verdana, "Microsoft YaHei", "微软雅黑", sans-serif',
+  };
+
+  function resolveFont(key) {
+    return FONT_STACKS[key] || FONT_STACKS.common;
+  }
 
   // ============================== 启动 ==============================
   boot();
@@ -147,7 +175,7 @@
           if (["targetLang", "translator", "aiBaseUrl", "aiApiKey", "aiModel"].includes(key)) {
             needRetranslate = true;
           }
-          if (["originalColor", "translatedColor", "originalSize", "translatedSize", "fontScale", "bilingual", "bgColor", "bgOpacity", "boxRadius", "boxPadding", "outline"].includes(key)) {
+          if (["originalColor", "translatedColor", "originalSize", "translatedSize", "fontScale", "bilingual", "bgColor", "bgOpacity", "boxRadius", "boxPadding", "outline", "fontFamily", "originalWeight", "translatedWeight"].includes(key)) {
             needRestyle = true;
           }
         }
@@ -296,7 +324,7 @@
     if (replayable) {
       try {
         const r = await askMain("GET_CUES", { baseUrl: track.baseUrl });
-        if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
+        if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body), config.mergeBySentence);
         else if (r && r.error && !lastError) lastError = r.error;
       } catch (e) {
         /* ignore */
@@ -304,7 +332,7 @@
       if (!cues.length) {
         try {
           const r = await sendBg("GET_CUES", { baseUrl: track.baseUrl });
-          if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
+          if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body), config.mergeBySentence);
           else if (r && r.error && !lastError) lastError = r.error;
         } catch (e) {
           /* ignore */
@@ -502,26 +530,118 @@
       LOG("字幕响应为空或无法解析，长度:", body ? body.length : 0);
       return [];
     }
-    return finalizeCues(cues);
+    return finalizeCues(cues, config.mergeBySentence);
   }
 
-  /** 排序 + 计算结束时间 + 合并相邻重复 */
-  function finalizeCues(cues) {
+  /**
+   * 判断一条字幕是否构成一个「可独立翻译的句子」。
+   *
+   * YouTube 的 ASR（自动生成）字幕切得非常碎，实测一条典型长视频的字幕是：
+   *   "This is a three. It's sloppily written"
+   *   "and rendered at an extremely low"
+   *   "resolution of 28x 28 pixels. But your"
+   *   "brain has no trouble recognizing it as a"
+   * 每条都是半句话。逐条翻译必然得到断头断尾的译文
+   *（"想象两个人到达同一个" —— 后半句还在下一条里）。
+   * 所以必须先拼成完整句再翻。
+   */
+  function endsSentence(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    // 剥掉结尾的引号/括号，再看真正的句末标点
+    const core = t.replace(/["'”’)\]】》」』]+\s*$/, "");
+    if (!core) return false;
+    // 中英文句末标点 + 省略号（… 视为可断句）
+    if (/[.!?…。！？]["'”’)\]】》」』]*\s*$/.test(core)) return true;
+    // 无句末标点但已经很长，也该断，否则会一直累积成一大段
+    return false;
+  }
+
+  /** 拼接碎片：一直拼到句末标点，或达到长度/时间上限 */
+  function mergeCuesToSentences(cues, maxChars, maxGapMs) {
+    const out = [];
+    let buf = null;
+
+    const flush = () => {
+      if (buf && buf.text.trim()) out.push(buf);
+      buf = null;
+    };
+
+    for (let i = 0; i < cues.length; i++) {
+      const c = cues[i];
+      const piece = c.text.trim();
+      if (!piece) continue; // 纯空白的占位 cue（ASR 里很常见）直接丢
+
+      if (!buf) {
+        buf = { start: c.start, end: c.end, dur: c.dur, text: piece };
+      } else {
+        // 间隔过大（> maxGapMs）视为另一段话，不硬拼
+        const gap = c.start - buf.end;
+        const tooFar = gap > maxGapMs;
+        const tooLong = (buf.text + " " + piece).length > maxChars;
+
+        if (tooFar) {
+          // 时间跳跃处断开：先把已攒的句子收口，再以当前句另起
+          flush();
+          buf = { start: c.start, end: c.end, dur: c.dur, text: piece };
+        } else if (tooLong) {
+          // 超长才切：先收口已有内容，当前句另起（保持顺序，不丢字）
+          flush();
+          buf = { start: c.start, end: c.end, dur: c.dur, text: piece };
+        } else {
+          buf.text = buf.text + " " + piece;
+          buf.end = Math.max(buf.end, c.end);
+          buf.dur = buf.end - buf.start;
+        }
+      }
+
+      // 拼到句末标点就收口
+      if (buf && endsSentence(buf.text)) flush();
+    }
+    flush();
+    return out;
+  }
+
+  /**
+   * 排序 + 去重滚动窗口 + 计算结束时间
+   * @param {boolean} bySentence 是否把碎片合并成完整句（决定翻译质量的关键开关）
+   */
+  function finalizeCues(cues, bySentence) {
     if (!cues.length) return [];
     cues.sort((a, b) => a.start - b.start);
-    const merged = [];
+
+    // 先算每条的结束时间
+    const withEnd = [];
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];
       const next = cues[i + 1];
       const end = c.start + (c.dur > 0 ? c.dur : next ? next.start - c.start : 4000);
-      const prev = merged[merged.length - 1];
+      withEnd.push({
+        start: c.start,
+        end: Math.max(end, c.start + 300),
+        dur: c.dur,
+        text: c.text,
+      });
+    }
+
+    // 去重：ASR 滚动窗口会反复出现同一段文本，只保留时间轴更长/更早的那次
+    const deduped = [];
+    for (let i = 0; i < withEnd.length; i++) {
+      const c = withEnd[i];
+      const prev = deduped[deduped.length - 1];
       if (prev && prev.text === c.text && c.start <= prev.end + 200) {
-        prev.end = Math.max(prev.end, end);
+        prev.end = Math.max(prev.end, c.end);
         continue;
       }
-      merged.push({ start: c.start, end: Math.max(end, c.start + 300), dur: c.dur, text: c.text });
+      deduped.push(c);
     }
-    return merged;
+
+    // 合并成完整句：这是翻译质量的关键。
+    // 关掉时退回「一条碎片一条字幕」，方便对比和排查。
+    const maxChars = config.mergeMaxChars || 160;
+    const maxGapMs = config.mergeMaxGapMs || 1200;
+    if (!bySentence) return deduped;
+    return mergeCuesToSentences(deduped, maxChars, maxGapMs);
   }
 
   /** 解析 timedtext 响应：json3（JSON）或 srv3 / srv1（XML） */
@@ -884,16 +1004,38 @@
     return "0 1px 2px rgba(0,0,0,0.9)";
   }
 
+  /**
+   * 字重修正：中文不能随便用 500/600。
+   *
+   * 实测（Arial + 微软雅黑，"想象两个人到达同一个晚宴" 40px）：
+   *   300/400/500/600/700 的文字宽度**完全相同（480px）**
+   *   ——说明微软雅黑没有真正的 500/600 中间字重，浏览器只能做
+   *      「合成加粗」（对字形外描边），视觉上笔画变粗、边缘发毛，
+   *      但宽度不变。这正是「中文看起来像被加粗了」的成因。
+   * 对照拉丁字体（Arial）：400=329px，600/700=356px（有真 Bold 字形）。
+   *
+   * 所以中文只用 400（Regular）和 700（Bold，字体里真实存在），
+   * 中间值一律降级到 400，避免伪粗体。
+   */
+  function fixCJKWeight(weight) {
+    const w = Number(weight);
+    if (!isFinite(w)) return 400;
+    if (w >= 650) return 700; // 真 Bold
+    return 400; // 其余（含 500/600）一律 Regular，避开合成加粗
+  }
+
   function applyStyles() {
     if (!box) return;
     const s = config.fontScale || 1;
     if (originalEl) {
       originalEl.style.color = config.originalColor;
       originalEl.style.fontSize = Math.round((config.originalSize || 18) * s) + "px";
+      originalEl.style.fontWeight = fixCJKWeight(config.originalWeight);
     }
     if (translatedEl) {
       translatedEl.style.color = config.translatedColor;
       translatedEl.style.fontSize = Math.round((config.translatedSize || 24) * s) + "px";
+      translatedEl.style.fontWeight = fixCJKWeight(config.translatedWeight);
     }
     if (originalEl) originalEl.style.display = config.bilingual ? "" : "none";
 
@@ -916,6 +1058,11 @@
     const shadow = outlineShadow(Number(config.outline) || 0);
     if (originalEl) originalEl.style.textShadow = shadow;
     if (translatedEl) translatedEl.style.textShadow = shadow;
+
+    // 字体
+    const ff = resolveFont(config.fontFamily);
+    if (originalEl) originalEl.style.fontFamily = ff;
+    if (translatedEl) translatedEl.style.fontFamily = ff;
   }
 
   function applyNativeVisibility() {

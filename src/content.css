@@ -4,7 +4,8 @@
   position: absolute;
   z-index: 60;
   pointer-events: none;
-  max-width: 92%;
+  /* 放宽到 96%：分句合并后单条字幕会变长，需要更多横向空间排成一行 */
+  max-width: 96%;
 }
 
 #ytbs-box {
@@ -76,16 +77,21 @@
   line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: "YouTube Sans", "Roboto", "Microsoft YaHei", system-ui, sans-serif;
+  /* 实际字体由 content.js 的 fontFamily 覆盖（见 FONT_STACKS）。
+     这里的值只是首屏兜底，且刻意不包含 "YouTube Sans"——
+     它没有中文字形，会让中英两行看起来是两种字体。 */
+  font-family: Arial, "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif;
 }
 
+/* 字重由 content.js 的 fixCJKWeight 控制（中文只用 400/700，避开合成伪粗体）。
+   这里的值仅作首屏兜底。 */
 .ytbs-original {
   font-weight: 400;
   opacity: 0.9;
 }
 
 .ytbs-translated {
-  font-weight: 600;
+  font-weight: 400;
 }
 
 #ytbs-status {
