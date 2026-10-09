@@ -21,9 +21,9 @@
     targetLang: "zh-CN",
     translator: "google", // google | ai
     // AI（OpenAI 兼容接口）
-    aiBaseUrl: "https://api.openai.com/v1",
+    aiBaseUrl: "http://localhost:8788/v1",
     aiApiKey: "",
-    aiModel: "gpt-4o-mini",
+    aiModel: "opencode/big-pickle",
     // 样式
     originalColor: "#ffffff",
     translatedColor: "#a7e8ff",

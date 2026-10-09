@@ -69,6 +69,7 @@ youtube-translate-ext/
 - **接入 OpenCode**：OpenCode 原生 API 是会话式的，不兼容 `/chat/completions`。
   本项目在 [`bridge/`](bridge/) 提供了一个几十行的桥接服务，把 OpenCode 的一次性生成接口
   `POST /api/experimental/generate` 包装成 OpenAI 格式，扩展即可直接使用。详见 [bridge/README.md](bridge/README.md)。
+  AI 引擎的默认配置即为 `http://localhost:8788/v1` + `opencode/big-pickle`。
 
 ## 持久化翻译缓存
 

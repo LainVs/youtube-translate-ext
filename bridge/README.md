@@ -31,14 +31,14 @@ npm start        # 默认监听 http://localhost:8788
 |------|-----|
 | 接口地址 Base URL | `http://localhost:8788/v1` |
 | API Key | 随便填或留空（桥不校验） |
-| 模型 | 留空用 OpenCode 默认模型；或填 `providerID/id` |
+| 模型 | `opencode/big-pickle`（默认）；留空则用 OpenCode 默认模型 |
 
 ## 环境变量
 
 | 变量 | 说明 |
 |------|------|
 | `BRIDGE_PORT` | 桥端口，默认 8788 |
-| `OPENCODE_MODEL` | 强制模型，如 `anthropic/claude-sonnet-4` |
+| `OPENCODE_MODEL` | 强制模型，如 `opencode/big-pickle` |
 | `OPENCODE_URL` | 直接指定 OpenCode 服务地址（跳过自动发现） |
 | `OPENCODE_TOKEN` | 配合 `OPENCODE_URL` 的 Bearer token |
 
