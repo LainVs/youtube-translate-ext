@@ -214,22 +214,33 @@
     await waitForPlayer();
     if (token !== loadToken) return;
 
-    // 取字幕轨道：优先走 background 的 ANDROID InnerTube 客户端
-    // （页面里的 baseUrl 现在带 &exp=xpe，被 PoToken 风控，直接 fetch 返回 200 空 body）
+    // 取字幕轨道（页面里的 baseUrl 带 &exp=xpe 被 PoToken 风控，必须走 ANDROID 客户端）
+    // 顺序：页面主世界（同源，实测最稳）→ background → 页面 ytInitialPlayerResponse
     lastError = "";
     lastSource = "";
     let tracks = [];
+
     try {
-      const r = await sendBg("GET_TRACKS", { videoId });
+      const r = await askMain("GET_TRACKS", { videoId: videoId });
       if (r && r.error) lastError = r.error;
       tracks = (r && r.tracks) || [];
-      if (tracks.length) lastSource = r.source || "android";
+      if (tracks.length) lastSource = "android";
     } catch (e) {
       lastError = String((e && e.message) || e);
-      LOG("ANDROID 取字幕轨道失败:", lastError);
     }
 
-    if (!tracks || tracks.length === 0) {
+    if (!tracks.length) {
+      try {
+        const r = await sendBg("GET_TRACKS", { videoId });
+        if (r && r.error && !lastError) lastError = r.error;
+        tracks = (r && r.tracks) || [];
+        if (tracks.length) lastSource = "android-bg";
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    if (!tracks.length) {
       // 兜底：页面 ytInitialPlayerResponse
       const playerResponse = await getPlayerResponse();
       if (token !== loadToken) return;
@@ -249,14 +260,23 @@
     const track = pickTrack(tracks);
     if (!track) return;
 
-    // 取字幕正文：同样优先走 background
+    // 取字幕正文
     let cues = [];
     try {
-      const r = await sendBg("GET_CUES", { baseUrl: track.baseUrl });
-      if (r && r.error) lastError = r.error;
+      const r = await askMain("GET_CUES", { baseUrl: track.baseUrl });
       if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
+      else if (r && r.error && !lastError) lastError = r.error;
     } catch (e) {
-      lastError = String((e && e.message) || e);
+      /* ignore */
+    }
+    if (!cues.length) {
+      try {
+        const r = await sendBg("GET_CUES", { baseUrl: track.baseUrl });
+        if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
+        else if (r && r.error && !lastError) lastError = r.error;
+      } catch (e) {
+        /* ignore */
+      }
     }
     if (!cues.length) {
       cues = await fetchCues(track.baseUrl); // 内容脚本直连兜底
@@ -650,6 +670,43 @@
     }
     renderCue(lastIndex, true);
     savePersistentNow();
+  }
+
+  // ---- 页面主世界桥（main-fetch.js 在 world: MAIN 中执行，避免被 YT 判为扩展流量）----
+  const MAIN_TAG = "__ytbs_main__";
+  const mainPending = new Map();
+  let mainReqId = 0;
+
+  window.addEventListener("message", (e) => {
+    if (e.source !== window) return;
+    const d = e.data;
+    if (!d || d[MAIN_TAG] !== true || !d.id) return;
+    const resolve = mainPending.get(d.id);
+    if (!resolve) return;
+    mainPending.delete(d.id);
+    resolve(d.result || {});
+  });
+
+  function askMain(type, payload, timeoutMs) {
+    return new Promise((resolve) => {
+      const id = ++mainReqId;
+      mainPending.set(id, resolve);
+      try {
+        window.postMessage(
+          Object.assign({ [MAIN_TAG]: true, from: "content", id: id, type: type }, payload || {}),
+          "*"
+        );
+      } catch (e) {
+        mainPending.delete(id);
+        resolve({ error: String((e && e.message) || e) });
+        return;
+      }
+      setTimeout(() => {
+        if (!mainPending.has(id)) return;
+        mainPending.delete(id);
+        resolve({ error: "主世界请求超时（main-fetch.js 可能没注入）" });
+      }, timeoutMs || 20000);
+    });
   }
 
   function sendBg(type, payload) {

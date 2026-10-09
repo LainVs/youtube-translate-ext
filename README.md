@@ -34,9 +34,9 @@
 ## 工作原理
 
 ```
-① 取字幕轨道   优先用 ANDROID InnerTube 客户端 POST /youtubei/v1/player
-               → captions.playerCaptionsTracklistRenderer.captionTracks
-               （页面里的 ytInitialPlayerResponse 作兜底）
+① 取字幕轨道   在「页面主世界」(world: MAIN) 里 POST /youtubei/v1/player
+               用 ANDROID 客户端 → captions...captionTracks
+               （来源顺序：主世界 → background → 页面 ytInitialPlayerResponse）
 ② 取字幕内容   覆盖 baseUrl 的 fmt=json3 → fetch → events[]（带时间轴）
                解析 json3，或 srv3/srv1 XML
 ③ 翻译         content.js 批量发给 background.js
@@ -45,9 +45,13 @@
 ⑤ 同步         setInterval(100ms) 读取 video.currentTime，二分查找当前字幕
 ```
 
-> ⚠️ **为什么必须走 ANDROID 客户端**：YouTube 现在给页面 `captionTracks[].baseUrl` 加了
-> `&exp=xpe` 并启用 PoToken 风控，直接 fetch 会返回 **HTTP 200 + 空 body**（静默失败，不报错）。
-> ANDROID 客户端的字幕 URL 不带该风控，可以正常取到内容。
+> ⚠️ **两个必须绕开的坑**
+> 1. 页面 `captionTracks[].baseUrl` 现在带 `&exp=xpe` 并启用 PoToken 风控，
+>    直接 fetch 会返回 **HTTP 200 + 空 body**（静默失败，不报错）。
+> 2. 字幕请求必须发在**页面主世界**。从 service worker 或隔离世界发出时，
+>    请求带 `Origin: chrome-extension://…`，YouTube 会回
+>    **HTTP 403 + Google “Sorry...” 反滥用页面**。所以用 `world: "MAIN"` 的
+>    content script（`src/main-fetch.js`）配合 `postMessage` 与主 content script 通信。
 
 详细调研见 [`research/FINDINGS.md`](research/FINDINGS.md)。
 
@@ -89,8 +93,10 @@ youtube-translate-ext/
 
 ## 已知限制 / 后续可做
 
-- 字幕获取走 ANDROID InnerTube 客户端（客户端版本 `20.10.38`，写在 `content.js` 里）。
+- 字幕获取走 ANDROID InnerTube 客户端（客户端版本 `20.10.38`，写在 `src/main-fetch.js` 里）。
   YouTube 若调整客户端版本或风控策略，可能需要更新该版本号；页面 `baseUrl` 直接取字幕已基本不可用。
+- 字幕请求依赖 `world: "MAIN"` content script，需要 Chrome 111 及以上。
+  如果 YouTube 日后加固到页面主世界也会被拦，就需要换成 BotGuard PoToken 方案（重量级）。
 - 若取不到字幕/翻译失败，页面会出现提示条（否则是静默失败）。
 - 目前字幕按“整条”翻译，超长视频首次翻译需要一点时间（有进度提示）。
 - 后续可选：自动检测原字幕语言。
