@@ -1,0 +1,1142 @@
+// YouTube 实时字幕翻译 Content Script
+// 基于双行结构、防闪烁、序列号机制的完整实现
+
+type TextAlignType = 'left' | 'center' | 'right';
+type TranslatedFontSizeType = 'small' | 'medium' | 'large';
+
+const TEXT_ALIGN_VALUES: TextAlignType[] = ['left', 'center', 'right'];
+const TRANSLATED_FONT_SIZE_VALUES: TranslatedFontSizeType[] = ['small', 'medium', 'large'];
+
+const TRANSLATED_FONT_SIZE_PX: Record<TranslatedFontSizeType, number> = {
+  small: 18,
+  medium: 22,
+  large: 26,
+};
+const MIN_TRANSLATED_FONT_PX = 12;
+const SUBTITLE_BOX_MAX_HEIGHT = '50vh';
+
+function normalizeTextAlign(value: unknown): TextAlignType {
+  return TEXT_ALIGN_VALUES.includes(value as TextAlignType) ? (value as TextAlignType) : 'center';
+}
+
+function normalizeTranslatedFontSize(value: unknown): TranslatedFontSizeType {
+  return TRANSLATED_FONT_SIZE_VALUES.includes(value as TranslatedFontSizeType) ? (value as TranslatedFontSizeType) : 'medium';
+}
+
+type UiLocale = 'en' | 'zh-CN' | 'zh-TW';
+const LOADING_TEXT: Record<UiLocale, string> = {
+  en: 'Loading...',
+  'zh-CN': '加载中...',
+  'zh-TW': '載入中...',
+};
+const DEFAULT_UI_LOCALE: UiLocale = 'en';
+function normalizeUiLocale(value: unknown): UiLocale {
+  return value === 'zh-CN' || value === 'zh-TW' ? value : 'en';
+}
+
+interface TranslationState {
+  enabled: boolean;
+  targetLang: string;
+  showOriginal: boolean;
+  hideOriginalSubtitles: boolean;
+  textAlign: TextAlignType;
+  translatedFontSize: TranslatedFontSizeType;
+}
+
+interface SubtitlePosition {
+  bottom: number;
+  left: number;
+}
+
+interface SubtitleData {
+  original: string;
+  translated: string;
+  timestamp: number;
+  seq: number;
+}
+
+interface TranslationRequest {
+  text: string;
+  sourceLang: string;
+  targetLang: string;
+  seq: number;
+}
+
+interface TranslationResponse {
+  translatedText: string;
+  seq: number;
+}
+
+// 翻译缓存（LRU）
+class TranslationCache {
+  private cache = new Map<string, { text: string; timestamp: number }>();
+  private readonly maxSize = 500;
+  private readonly ttl = 1000 * 60 * 60 * 24; // 24小时
+
+  private getKey(sourceLang: string, targetLang: string, text: string): string {
+    return `${sourceLang}:${targetLang}:${this.normalize(text)}`;
+  }
+
+  private normalize(text: string): string {
+    return text.trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+
+  get(sourceLang: string, targetLang: string, text: string): string | null {
+    const key = this.getKey(sourceLang, targetLang, text);
+    const item = this.cache.get(key);
+
+    if (!item) return null;
+
+    if (Date.now() - item.timestamp > this.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return item.text;
+  }
+
+  set(sourceLang: string, targetLang: string, text: string, translatedText: string): void {
+    const key = this.getKey(sourceLang, targetLang, text);
+
+    if (this.cache.size >= this.maxSize) {
+      // 删除最旧的项
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey) {
+        this.cache.delete(firstKey);
+      }
+    }
+
+    this.cache.set(key, {
+      text: translatedText,
+      timestamp: Date.now(),
+    });
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+class SubtitleTranslator {
+  private state: TranslationState = {
+    enabled: true,
+    targetLang: 'zh-CN',
+    showOriginal: false,
+    hideOriginalSubtitles: false,
+    textAlign: 'center',
+    translatedFontSize: 'medium',
+  };
+
+  // UI 元素（wrapper 为全尺寸定位层，overlay 挂在其内）
+  private wrapper: HTMLDivElement | null = null;
+  private overlay: HTMLDivElement | null = null;
+  private subtitleBox: HTMLDivElement | null = null;
+  private loadingLine: HTMLDivElement | null = null;
+  private originalLine: HTMLDivElement | null = null;
+  private translatedLine: HTMLDivElement | null = null;
+
+  // 字幕状态
+  private currentSubtitle: SubtitleData | null = null;
+  private lastOriginalText = '';
+  private debounceTimer: number | null = null;
+  private readonly DEBOUNCE_DELAY = 180;
+  private lastProcessTime = 0;
+  private readonly THROTTLE_DELAY = 60; // 节流延迟，提高实时性
+  private lastTranslatedText = ''; // 记录上次翻译的文本
+  private seq = 0;
+  private latestSeq = 0;
+  private lastValidSubtitleTime = 0; // 上次检测到有效字幕的时间
+  private readonly SUBTITLE_TIMEOUT = 3000; // 3秒无字幕则清理
+
+  // 拖拽状态
+  private isDragging = false;
+  private isClosed = false; // 关闭状态
+  private dragOffsetX = 0;
+  private dragOffsetY = 0;
+  private position: SubtitlePosition = { bottom: 120, left: 0 };
+  private overlayWidth = 800;
+  /** 为 true 时用 CSS 底部居中（left:50%+transform），不依赖像素 left */
+  private useDefaultPosition = true;
+
+  // 字幕监听
+  private observer: MutationObserver | null = null;
+  private checkInterval: number | null = null;
+  private subtitleObserver: MutationObserver | null = null; // 用于隐藏原生字幕的 observer
+  private isVideoPaused = false;
+
+  // 广告检测
+  private isAdPlaying = false;
+  private adCheckInterval: number | null = null;
+
+  // 界面语言（与 popup 一致，用于加载文案等）
+  private uiLanguage: UiLocale = DEFAULT_UI_LOCALE;
+
+  // overlay 创建重试
+  private createOverlayAttempts = 0;
+  private static readonly MAX_OVERLAY_ATTEMPTS = 15;
+
+  // 翻译
+  private cache = new TranslationCache();
+  private translationQueue = new Set<string>();
+  private readonly TRANSLATION_INTERVAL = 500; // 500ms 限流，提高实时性
+
+  constructor() {
+    this.init();
+  }
+
+  private async init() {
+    console.log('[YouTube Live Translate] 初始化中...');
+
+    const result = await chrome.storage.sync.get(['enabled', 'targetLang', 'showOriginal', 'hideOriginalSubtitles', 'textAlign', 'translatedFontSize', 'position', 'isClosed', 'uiLanguage']);
+    this.uiLanguage = normalizeUiLocale(result.uiLanguage);
+    this.state = {
+      enabled: result.enabled ?? true,
+      targetLang: result.targetLang ?? 'zh-CN',
+      showOriginal: result.showOriginal ?? false,
+      hideOriginalSubtitles: result.hideOriginalSubtitles ?? false,
+      textAlign: normalizeTextAlign(result.textAlign),
+      translatedFontSize: normalizeTranslatedFontSize(result.translatedFontSize),
+    };
+
+    // 读取位置：无保存或为默认占位则使用“默认底部居中”（CSS 百分比）；否则用保存的像素位置
+    const saved = result.position as SubtitlePosition | undefined;
+    if (saved && typeof saved.left === 'number' && typeof saved.bottom === 'number') {
+      const isDefaultPlaceholder = saved.left === 0 && saved.bottom === 120;
+      if (!isDefaultPlaceholder) {
+        this.position = saved;
+        this.useDefaultPosition = false;
+      }
+    }
+
+    // 读取关闭状态
+    this.isClosed = result.isClosed ?? false;
+
+    console.log('[YouTube Live Translate] 设置:', this.state);
+    console.log('[YouTube Live Translate] 位置:', this.position);
+    console.log('[YouTube Live Translate] 关闭状态:', this.isClosed);
+
+    // 应用隐藏原生字幕设置
+    this.updateOriginalSubtitlesVisibility();
+
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+      if (namespace === 'sync') {
+        if (changes.uiLanguage) {
+          this.uiLanguage = normalizeUiLocale(changes.uiLanguage.newValue);
+          this.updateLoadingText();
+        }
+        if (changes.enabled) {
+          this.state.enabled = changes.enabled.newValue;
+          this.toggleTranslation();
+        }
+        if (changes.targetLang) {
+          this.state.targetLang = changes.targetLang.newValue;
+          this.cache.clear();
+        }
+        if (changes.showOriginal) {
+          this.state.showOriginal = changes.showOriginal.newValue;
+          this.updateOriginalVisibility();
+        }
+        if (changes.hideOriginalSubtitles) {
+          this.state.hideOriginalSubtitles = changes.hideOriginalSubtitles.newValue;
+          this.updateOriginalSubtitlesVisibility();
+        }
+        if (changes.textAlign) {
+          this.state.textAlign = normalizeTextAlign(changes.textAlign.newValue);
+          this.updateTextAlign();
+        }
+        if (changes.translatedFontSize) {
+          this.state.translatedFontSize = normalizeTranslatedFontSize(changes.translatedFontSize.newValue);
+          this.updateTranslatedFontSize();
+        }
+      }
+    });
+
+    this.setupVideoPauseDetection();
+    this.setupAdDetection();
+    this.setupKeyboardShortcuts();
+    this.createOverlay();
+    this.startWatchingSubtitles();
+  }
+
+  private setupVideoPauseDetection() {
+    const checkVideo = () => {
+      const video = document.querySelector('video');
+      if (video) {
+        console.log('[YouTube Live Translate] 找到视频元素');
+
+        video.addEventListener('pause', () => {
+          console.log('[YouTube Live Translate] 视频暂停');
+          this.isVideoPaused = true;
+        });
+
+        video.addEventListener('play', () => {
+          console.log('[YouTube Live Translate] 视频播放');
+          this.isVideoPaused = false;
+        });
+
+        this.isVideoPaused = video.paused;
+      } else {
+        setTimeout(checkVideo, 1000);
+      }
+    };
+
+    checkVideo();
+  }
+
+  private setupAdDetection() {
+    console.log('[YouTube Live Translate] 初始化广告检测...');
+
+    const checkForAds = () => {
+      // YouTube 广告的多个特征
+      const adIndicators = [
+        // 广告播放器覆盖层
+        '.ytp-ad-player-overlay',
+        // 广告预览图片
+        '.ytp-ad-preview-image',
+        // 广告徽章
+        '.ytp-ad-badge',
+        // 跳过广告按钮
+        '.ytp-ad-skip-button',
+        // 广告文本
+        '.ytp-ad-text',
+        // 广告进度条
+        '.ytp-ad-progress',
+      ];
+
+      // 检查是否存在广告元素
+      let hasAdElements = false;
+      for (const selector of adIndicators) {
+        const element = document.querySelector(selector) as HTMLElement;
+        if (element && element.offsetParent !== null) { // 确保元素可见
+          hasAdElements = true;
+          break;
+        }
+      }
+
+      // 另一种检测方式：检查视频容器的类名
+      const player = document.querySelector('#movie_player');
+      if (player) {
+        const playerClasses = player.classList;
+        // YouTube 会在广告播放时添加这些类
+        if (
+          playerClasses.contains('ad-showing') ||
+          playerClasses.contains('ad-interrupting')
+        ) {
+          hasAdElements = true;
+        }
+      }
+
+      // 检测广告状态变化
+      if (hasAdElements && !this.isAdPlaying) {
+        // 广告开始
+        console.log('[YouTube Live Translate] 检测到广告开始，隐藏字幕');
+        this.isAdPlaying = true;
+        if (this.overlay) {
+          this.overlay.style.display = 'none';
+        }
+      } else if (!hasAdElements && this.isAdPlaying) {
+        // 广告结束
+        console.log('[YouTube Live Translate] 广告结束，显示字幕');
+        this.isAdPlaying = false;
+        if (this.overlay && !this.isClosed) {
+          this.overlay.style.display = 'block';
+        }
+        // 重新应用隐藏YouTube原生字幕的设置
+        this.updateOriginalSubtitlesVisibility();
+      }
+    };
+
+    // 每秒检查一次广告状态
+    this.adCheckInterval = window.setInterval(checkForAds, 1000) as unknown as number;
+
+    // 初始检查
+    checkForAds();
+  }
+
+  /** 快捷键修饰键：Windows/Linux 用 Alt，Mac 用 Option 或 Command 均可 */
+  private isShortcutModifier(e: KeyboardEvent): boolean {
+    return e.altKey || e.metaKey;
+  }
+
+  private setupKeyboardShortcuts() {
+    document.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      if (!this.isShortcutModifier(e)) return;
+
+      // Modifier + E：开启/关闭插件（切换翻译启用状态）
+      if (key === 'e') {
+        e.preventDefault();
+        this.state.enabled = !this.state.enabled;
+        chrome.storage.sync.set({ enabled: this.state.enabled });
+        this.toggleTranslation();
+        if (this.state.enabled && !this.isClosed && this.overlay) {
+          this.overlay.style.display = 'block';
+        }
+        console.log('[YouTube Live Translate] 翻译', this.state.enabled ? '已开启' : '已关闭');
+      }
+    });
+  }
+
+  /** 查找播放器根节点（含 Shadow DOM），供 overlay 挂载 */
+  private findPlayer(): HTMLElement | null {
+    let player = document.querySelector('#movie_player') as HTMLElement | null;
+    if (player) return player;
+
+    const ytdPlayer = document.querySelector('ytd-player');
+    if (ytdPlayer?.shadowRoot) {
+      player = ytdPlayer.shadowRoot.querySelector('#movie_player') as HTMLElement | null;
+      if (player) return player;
+    }
+
+    return (document.querySelector('ytd-player') as HTMLElement) || null;
+  }
+
+  private createOverlay() {
+    if (this.overlay) return;
+
+    const player = this.findPlayer();
+    if (!player) {
+      this.createOverlayAttempts += 1;
+      if (this.createOverlayAttempts >= SubtitleTranslator.MAX_OVERLAY_ATTEMPTS) {
+        console.error('[YouTube Live Translate] 多次未找到播放器，停止重试');
+        return;
+      }
+      console.warn('[YouTube Live Translate] 未找到播放器，2 秒后重试');
+      setTimeout(() => this.createOverlay(), 2000);
+      return;
+    }
+
+    const playerEl = player as HTMLElement;
+    const pos = window.getComputedStyle(playerEl).position;
+    if (pos === 'static') {
+      playerEl.style.position = 'relative';
+    }
+
+    // 全尺寸包装层，与播放器同大，使 overlay 的 left:50% 相对播放器居中
+    const wrapper = document.createElement('div');
+    this.wrapper = wrapper;
+    wrapper.id = 'yt-live-translate-wrapper';
+    wrapper.style.cssText = `
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 9998;
+    `;
+
+    this.overlay = document.createElement('div');
+    this.overlay.id = 'yt-live-translate-overlay';
+    this.overlay.style.cssText = `
+      width: ${this.overlayWidth}px;
+      height: auto;
+      z-index: 9999;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      pointer-events: none;
+      position: absolute;
+      display: none;
+    `;
+    this.updateOverlayPosition();
+
+    // 创建字幕框
+    this.subtitleBox = document.createElement('div');
+    this.subtitleBox.id = 'yt-live-translate-box';
+    this.subtitleBox.style.cssText = `
+      background: rgba(0, 0, 0, 0.6);
+      padding: 12px 20px;
+      padding-top: 8px;
+      border-radius: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      pointer-events: auto;
+      position: relative;
+      cursor: grab;
+      max-height: ${SUBTITLE_BOX_MAX_HEIGHT};
+      overflow: hidden;
+    `;
+
+    // 拖拽事件绑定到整个字幕框
+    this.subtitleBox.addEventListener('mousedown', (e) => this.handleMouseDown(e));
+
+    // 加载状态行（翻译请求中显示）
+    this.loadingLine = document.createElement('div');
+    this.loadingLine.id = 'yt-live-translate-loading';
+    this.loadingLine.setAttribute('aria-hidden', 'true');
+    this.loadingLine.style.cssText = `
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: rgba(255, 255, 255, 0.8);
+      font-size: 16px;
+      pointer-events: none;
+    `;
+    const spinner = document.createElement('span');
+    spinner.style.cssText = `
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: yt-live-translate-spin 0.7s linear infinite;
+    `;
+    const loadingText = document.createElement('span');
+    loadingText.className = 'yt-live-translate-loading-text';
+    loadingText.textContent = LOADING_TEXT[this.uiLanguage];
+    this.loadingLine.appendChild(spinner);
+    this.loadingLine.appendChild(loadingText);
+    this.injectLoadingStyles();
+    this.subtitleBox.appendChild(this.loadingLine);
+
+    // 原文行（默认隐藏，最多 2 行显示）
+    this.originalLine = document.createElement('div');
+    this.originalLine.id = 'yt-live-translate-original';
+    this.originalLine.style.cssText = `
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 18px;
+      line-height: 1.4;
+      text-align: ${this.state.textAlign};
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      display: ${this.state.showOriginal ? '-webkit-box' : 'none'};
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
+      user-select: none;
+    `;
+
+    // 译文行（完整显示，不截断；超出时自动缩小字号）
+    const translatedFontSizePx = TRANSLATED_FONT_SIZE_PX[this.state.translatedFontSize];
+    this.translatedLine = document.createElement('div');
+    this.translatedLine.id = 'yt-live-translate-translated';
+    this.translatedLine.style.cssText = `
+      color: white;
+      font-size: ${translatedFontSizePx}px;
+      line-height: 1.4;
+      font-weight: 500;
+      text-align: ${this.state.textAlign};
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      pointer-events: none;
+      user-select: none;
+      display: block;
+    `;
+
+    // 组装 DOM：overlay 放入 wrapper，wrapper 放入播放器
+    this.subtitleBox.appendChild(this.originalLine);
+    this.subtitleBox.appendChild(this.translatedLine);
+    this.overlay.appendChild(this.subtitleBox);
+    wrapper.appendChild(this.overlay);
+    player.appendChild(wrapper);
+
+    console.log('[YouTube Live Translate] Overlay 已创建，默认居中:', this.useDefaultPosition);
+  }
+
+  private injectLoadingStyles() {
+    if (document.getElementById('yt-live-translate-loading-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'yt-live-translate-loading-styles';
+    style.textContent = `
+      @keyframes yt-live-translate-spin {
+        to { transform: rotate(360deg); }
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  private showLoading() {
+    if (this.loadingLine) {
+      this.loadingLine.style.display = 'flex';
+    }
+  }
+
+  private hideLoading() {
+    if (this.loadingLine) {
+      this.loadingLine.style.display = 'none';
+    }
+  }
+
+  private updateLoadingText() {
+    if (!this.loadingLine) return;
+    const textEl = this.loadingLine.querySelector('.yt-live-translate-loading-text');
+    if (textEl) textEl.textContent = LOADING_TEXT[this.uiLanguage];
+  }
+
+  private updateOverlayPosition() {
+    if (!this.overlay) return;
+    if (this.useDefaultPosition) {
+      this.overlay.style.left = '50%';
+      this.overlay.style.transform = 'translateX(-50%)';
+      this.overlay.style.bottom = '120px';
+    } else {
+      this.overlay.style.left = `${this.position.left}px`;
+      this.overlay.style.bottom = `${this.position.bottom}px`;
+      this.overlay.style.transform = '';
+    }
+  }
+
+  private savePosition() {
+    chrome.storage.sync.set({ position: this.position });
+  }
+
+  private handleMouseDown(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'BUTTON' || target.id === 'yt-live-translate-original' || target.id === 'yt-live-translate-translated') {
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    // 若当前是“默认居中”模式，先拍下当前像素位置再切到像素模式，避免拖拽时跳动
+    if (this.useDefaultPosition && this.overlay?.parentElement) {
+      const parent = this.overlay.parentElement;
+      const parentRect = parent.getBoundingClientRect();
+      const overlayRect = this.overlay.getBoundingClientRect();
+      this.position = {
+        left: overlayRect.left - parentRect.left,
+        bottom: parentRect.bottom - overlayRect.bottom,
+      };
+      this.useDefaultPosition = false;
+      this.updateOverlayPosition();
+    }
+
+    console.log('[YouTube Live Translate] 开始拖拽');
+
+    this.isDragging = true;
+
+    if (this.overlay) {
+      const rect = this.overlay.getBoundingClientRect();
+      this.dragOffsetX = e.clientX - rect.left;
+      this.dragOffsetY = rect.bottom - e.clientY;
+    }
+
+    // 改变光标样式
+    if (this.subtitleBox) {
+      this.subtitleBox.style.cursor = 'grabbing';
+    }
+
+    // 添加全局事件监听
+    document.addEventListener('mousemove', this.handleMouseMove);
+    document.addEventListener('mouseup', this.handleMouseUp);
+  }
+
+  private handleMouseMove = (e: MouseEvent) => {
+    if (!this.isDragging || !this.overlay) return;
+
+    const parent = this.overlay.parentElement;
+    if (!parent) return;
+
+    const parentRect = parent.getBoundingClientRect();
+
+    // 计算新的位置
+    // left: 鼠标位置 - offset
+    // bottom: 父容器底部 - (鼠标位置 + offset的修正)
+    let newLeft = e.clientX - parentRect.left - this.dragOffsetX;
+    let newBottom = parentRect.bottom - e.clientY - this.dragOffsetY;
+
+    // 限制范围
+    const maxLeft = parentRect.width - this.overlayWidth;
+    const minLeft = 0;
+    const maxBottom = parentRect.height - 50;
+    const minBottom = 20;
+
+    this.position.left = Math.max(minLeft, Math.min(newLeft, maxLeft));
+    this.position.bottom = Math.max(minBottom, Math.min(newBottom, maxBottom));
+
+    this.updateOverlayPosition();
+  };
+
+  private handleMouseUp = () => {
+    if (this.isDragging) {
+      this.isDragging = false;
+      this.savePosition();
+      console.log('[YouTube Live Translate] 拖拽结束，位置已保存:', this.position);
+
+      // 恢复光标样式
+      if (this.subtitleBox) {
+        this.subtitleBox.style.cursor = 'grab';
+      }
+    }
+
+    document.removeEventListener('mousemove', this.handleMouseMove);
+    document.removeEventListener('mouseup', this.handleMouseUp);
+  };
+
+  private updateOriginalVisibility() {
+    if (!this.originalLine) return;
+    this.originalLine.style.display = this.state.showOriginal ? '-webkit-box' : 'none';
+  }
+
+  private updateTextAlign() {
+    if (this.originalLine) this.originalLine.style.textAlign = this.state.textAlign;
+    if (this.translatedLine) this.translatedLine.style.textAlign = this.state.textAlign;
+  }
+
+  private updateTranslatedFontSize() {
+    if (!this.translatedLine) return;
+    this.translatedLine.style.fontSize = `${TRANSLATED_FONT_SIZE_PX[this.state.translatedFontSize]}px`;
+  }
+
+  private updateOriginalSubtitlesVisibility() {
+    // 隐藏/显示 YouTube 原生字幕
+    const hideShowSubtitles = () => {
+      // YouTube 原生字幕的选择器
+      const youtubeSubtitles = [
+        '.ytp-caption-segment',
+        'caption-window.ytp-caption-window-bottom',
+        '.captions-text',
+        '.ytp-caption-window-container',
+      ];
+
+      youtubeSubtitles.forEach((selector) => {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach((element) => {
+          if (this.state.hideOriginalSubtitles) {
+            (element as HTMLElement).style.opacity = '0';
+            (element as HTMLElement).style.visibility = 'hidden';
+          } else {
+            (element as HTMLElement).style.opacity = '';
+            (element as HTMLElement).style.visibility = '';
+          }
+        });
+      });
+
+      // 同时处理字幕容器
+      const player = document.querySelector('#movie_player') || document.querySelector('ytd-player');
+      if (player) {
+        const captionContainers = player.querySelectorAll('.caption-visual-line');
+        captionContainers.forEach((container) => {
+          if (this.state.hideOriginalSubtitles) {
+            (container as HTMLElement).style.display = 'none';
+          } else {
+            (container as HTMLElement).style.display = '';
+          }
+        });
+      }
+    };
+
+    // 立即执行一次
+    hideShowSubtitles();
+
+    // 如果启用了隐藏原生字幕，使用MutationObserver持续监听新出现的字幕元素
+    if (this.state.hideOriginalSubtitles) {
+      if (this.subtitleObserver) {
+        this.subtitleObserver.disconnect();
+      }
+
+      this.subtitleObserver = new MutationObserver(() => {
+        hideShowSubtitles();
+      });
+
+      this.subtitleObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    } else {
+      if (this.subtitleObserver) {
+        this.subtitleObserver.disconnect();
+        this.subtitleObserver = null;
+      }
+    }
+  }
+
+  private startWatchingSubtitles() {
+    console.log('[YouTube Live Translate] 开始监听字幕...');
+
+    const selectors = [
+      '.ytp-caption-segment',
+      'caption-window.ytp-caption-window-bottom',
+      '.captions-text',
+      // 备用选择器：Windows 上可能使用的结构
+      '.ytp-caption-window-container .caption-visual-line',
+      '.ytp-caption-window-container span',
+    ];
+
+    const checkForSubtitles = () => {
+      for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        if (elements.length > 0) {
+          // 验证元素是否真的包含文本
+          let hasText = false;
+          elements.forEach((el) => {
+            if (el.textContent?.trim()) {
+              hasText = true;
+            }
+          });
+
+          if (hasText) {
+            console.log(`[YouTube Live Translate] 找到字幕元素: ${selector} (数量: ${elements.length})`);
+            this.observeSubtitles(selector);
+            return;
+          } else {
+            console.log(`[YouTube Live Translate] 跳过无文本的选择器: ${selector}`);
+          }
+        }
+      }
+      setTimeout(checkForSubtitles, 1000);
+    };
+
+    checkForSubtitles();
+  }
+
+  private observeSubtitles(selector: string) {
+    // 使用 MutationObserver 监听字幕变化
+    this.observer = new MutationObserver(() => {
+      this.handleSubtitleChange(selector);
+    });
+
+    const targetNode = document.body;
+    this.observer.observe(targetNode, {
+      childList: true,
+      subtree: true,
+    });
+
+    // 定时器兜底，缩短间隔提高实时性
+    this.checkInterval = window.setInterval(() => {
+      this.handleSubtitleChange(selector);
+    }, 120) as unknown as number;
+
+    console.log('[YouTube Live Translate] 开始监听字幕变化');
+  }
+
+  /** 内容过长时按整句保留（从末尾取若干整句），避免截断单词。单句超长时再按单词边界截断。 */
+  private truncateBySentences(text: string, maxLength: number): string {
+    if (text.length <= maxLength) return text;
+    const segments = text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+    if (segments.length === 0) return this.truncateByWords(text, maxLength);
+    let result = '';
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const next = result ? segments[i] + ' ' + result : segments[i];
+      if (next.length <= maxLength) {
+        result = next;
+      } else {
+        if (result) break;
+        result = this.truncateByWords(segments[i], maxLength);
+        break;
+      }
+    }
+    return result || this.truncateByWords(text, maxLength);
+  }
+
+  /** 按单词边界截断：取末尾 maxLength 内且在空格处截断，不切断单词。 */
+  private truncateByWords(text: string, maxLength: number): string {
+    if (text.length <= maxLength) return text;
+    const tail = text.slice(-maxLength);
+    const firstSpace = tail.indexOf(' ');
+    if (firstSpace > 0 && firstSpace < tail.length - 1) {
+      return tail.slice(firstSpace + 1).trim();
+    }
+    return tail;
+  }
+
+  private handleSubtitleChange(selector: string) {
+    if (!this.state.enabled || this.isVideoPaused || this.isAdPlaying) return;
+
+    // 节流检查：避免高频触发
+    const now = Date.now();
+    if (now - this.lastProcessTime < this.THROTTLE_DELAY) {
+      return;
+    }
+
+    const elements = document.querySelectorAll(selector);
+    if (elements.length === 0) {
+      // 检查是否超时，超时则清理字幕显示
+      if (this.lastValidSubtitleTime > 0 && now - this.lastValidSubtitleTime > this.SUBTITLE_TIMEOUT) {
+        console.log('[YouTube Live Translate] 字幕元素消失超时，清理翻译控件');
+        this.clearSubtitle();
+        this.lastValidSubtitleTime = 0;
+      }
+      return;
+    }
+
+    // 提取当前字幕文本
+    let currentText = '';
+    elements.forEach((el) => {
+      const text = el.textContent?.trim();
+      if (text) {
+        currentText += (currentText ? ' ' : '') + text;
+      }
+    });
+
+    // 调试日志：显示提取的文本内容
+    if (currentText) {
+      console.log(`[YouTube Live Translate] 字幕变化: "${currentText.substring(0, 50)}${currentText.length > 50 ? '...' : ''}"`);
+      // 更新最后有效字幕时间
+      this.lastValidSubtitleTime = now;
+    } else {
+      console.log(`[YouTube Live Translate] ⚠️ 找到元素但文本为空 (selector: ${selector}, elements: ${elements.length})`);
+      // 调试：显示元素的 HTML 结构
+      if (elements.length > 0) {
+        console.log('[YouTube Live Translate] 元素 HTML:', elements[0].outerHTML.substring(0, 200));
+      }
+      // 文本为空时也检查超时
+      if (this.lastValidSubtitleTime > 0 && now - this.lastValidSubtitleTime > this.SUBTITLE_TIMEOUT) {
+        console.log('[YouTube Live Translate] 字幕文本为空超时，清理翻译控件');
+        this.clearSubtitle();
+        this.lastValidSubtitleTime = 0;
+      }
+      return;
+    }
+
+    // 如果文本没有变化，不处理
+    if (currentText === this.lastOriginalText) return;
+
+    // 首次有内容（刚载入或清空后）：必须刷新 UI 并触发翻译
+    const isFirstContent = this.lastOriginalText === '';
+    // 检测是否是新句子（文本变短说明是新句子）
+    const isNewSentence = !isFirstContent && currentText.length < this.lastOriginalText.length;
+
+    let textToTranslate = currentText;
+    let shouldRefreshUI = false;
+    let shouldTranslateImmediately = false;
+
+    if (isFirstContent) {
+      textToTranslate =
+        currentText.length > 200 ? this.truncateBySentences(currentText, 200) : currentText;
+      shouldRefreshUI = true;
+      shouldTranslateImmediately = currentText.length > 200;
+      console.log('[YouTube Live Translate] 首次内容，刷新UI并触发翻译');
+    } else if (isNewSentence) {
+      textToTranslate = currentText;
+      shouldRefreshUI = true;
+      this.lastTranslatedText = '';
+      console.log('[YouTube Live Translate] 新句子，刷新UI');
+    } else if (currentText.length > 200) {
+      textToTranslate = this.truncateBySentences(currentText, 200);
+      shouldRefreshUI = true;
+      shouldTranslateImmediately = true;
+      console.log('[YouTube Live Translate] 文本过长，按整句截断并立即翻译');
+    } else if (!currentText.includes(this.lastOriginalText)) {
+      textToTranslate = currentText;
+      shouldRefreshUI = true;
+      console.log('[YouTube Live Translate] 内容不同，刷新UI');
+    } else {
+      textToTranslate = currentText;
+      shouldRefreshUI = false;
+      console.log('[YouTube Live Translate] 追加文本，不刷新UI');
+    }
+
+    // 如果处理后的文本还是和上次相同，不处理
+    if (textToTranslate === this.lastOriginalText && !shouldRefreshUI) {
+      return;
+    }
+
+    // 更新原文（根据是否需要刷新决定是否更新UI）
+    this.lastOriginalText = textToTranslate;
+    this.lastProcessTime = now;
+
+    if (shouldRefreshUI) {
+      if (this.originalLine) {
+        this.originalLine.textContent = this.lastOriginalText;
+      }
+
+      // 仅当未关闭字幕时显示 overlay；仅在尚无译文时（初始化）显示加载中
+      if (this.overlay && !this.isClosed) {
+        this.overlay.style.display = 'block';
+        this.overlay.style.opacity = '1';
+        const hasContent = this.translatedLine?.textContent?.trim();
+        if (!hasContent) this.showLoading();
+      }
+
+      // 如果需要立即翻译，直接请求
+      if (shouldTranslateImmediately) {
+        // 检查是否和上次翻译的文本相同，避免重复翻译
+        if (textToTranslate !== this.lastTranslatedText) {
+          console.log('[YouTube Live Translate] 立即触发翻译');
+          this.lastTranslatedText = textToTranslate;
+          this.requestTranslation(textToTranslate);
+        } else {
+          console.log('[YouTube Live Translate] 文本已翻译过，跳过');
+        }
+      } else {
+        // 否则使用 debounce 等待字幕稳定
+        // 清除之前的 debounce 定时器
+        if (this.debounceTimer) {
+          clearTimeout(this.debounceTimer);
+        }
+
+        // 设置新的 debounce 定时器
+        const textForTranslation = this.lastOriginalText;
+        this.debounceTimer = window.setTimeout(() => {
+          if (textForTranslation === this.lastOriginalText) {
+            console.log('[YouTube Live Translate] 字幕稳定，触发翻译');
+            this.requestTranslation(textForTranslation);
+          }
+        }, this.DEBOUNCE_DELAY);
+      }
+    }
+  }
+
+  private async requestTranslation(text: string) {
+    // 生成新的序列号
+    this.seq++;
+    const currentSeq = this.seq;
+    this.latestSeq = currentSeq;
+
+    console.log(`[YouTube Live Translate] 请求翻译 [seq=${currentSeq}]:`, text);
+
+    // 检查缓存
+    const cached = this.cache.get('auto', this.state.targetLang, text);
+    if (cached) {
+      console.log(`[YouTube Live Translate] 命中缓存 [seq=${currentSeq}]`);
+      this.updateTranslation(text, cached, currentSeq);
+      return;
+    }
+
+    // 检查是否已在队列中
+    if (this.translationQueue.has(text)) {
+      console.log(`[YouTube Live Translate] 已在翻译队列中 [seq=${currentSeq}]`);
+      return;
+    }
+
+    // 限流：检查最近的翻译时间
+    const now = Date.now();
+    const lastTranslationTime = this.currentSubtitle?.timestamp || 0;
+    if (now - lastTranslationTime < this.TRANSLATION_INTERVAL) {
+      // 需要等待
+      const waitTime = this.TRANSLATION_INTERVAL - (now - lastTranslationTime);
+      setTimeout(() => {
+        this.requestTranslation(text);
+      }, waitTime);
+      return;
+    }
+
+    // 添加到队列
+    this.translationQueue.add(text);
+
+    try {
+      const translated = await this.translateText(text);
+      this.translationQueue.delete(text);
+      this.cache.set('auto', this.state.targetLang, text, translated);
+
+      // 检查序列号，只接受最新的结果
+      if (currentSeq === this.latestSeq) {
+        console.log(`[YouTube Live Translate] 翻译完成 [seq=${currentSeq}]:`, translated);
+        this.updateTranslation(text, translated, currentSeq);
+      } else {
+        console.log(`[YouTube Live Translate] 丢弃过期翻译 [seq=${currentSeq}, latest=${this.latestSeq}]`);
+      }
+    } catch (error) {
+      console.error(`[YouTube Live Translate] 翻译失败 [seq=${currentSeq}]:`, error);
+      this.translationQueue.delete(text);
+    }
+  }
+
+  private async translateText(text: string): Promise<string> {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${this.state.targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`翻译请求失败: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+
+    if (data && Array.isArray(data[0])) {
+      const parts = data[0]
+        .map((item: unknown) => (item && Array.isArray(item) ? item[0] : null))
+        .filter((s): s is string => s != null && typeof s === 'string');
+      return parts.length > 0 ? parts.join('') : text;
+    }
+
+    return text;
+  }
+
+  private updateTranslation(original: string, translated: string, seq: number) {
+    if (!this.translatedLine || !this.subtitleBox) return;
+
+    // 更新当前字幕
+    this.currentSubtitle = {
+      original,
+      translated,
+      timestamp: Date.now(),
+      seq,
+    };
+
+    // 记录已翻译的文本
+    this.lastTranslatedText = original;
+
+    // 更新 UI - 新字幕替换旧字幕，隐藏加载状态
+    this.hideLoading();
+    this.translatedLine.textContent = translated;
+
+    // 先用用户设定的字号，再按需缩小以完整显示
+    const basePx = TRANSLATED_FONT_SIZE_PX[this.state.translatedFontSize];
+    this.translatedLine.style.fontSize = `${basePx}px`;
+    this.fitTranslatedFontSizeToBox();
+
+    // 仅当未关闭字幕时显示 overlay
+    if (this.overlay && !this.isClosed) {
+      this.overlay.style.display = 'block';
+      this.overlay.style.opacity = '1';
+    }
+
+    console.log('[YouTube Live Translate] 译文已更新');
+  }
+
+  /** 若字幕框内容溢出，则逐步缩小译文字号直到全部显示或达到最小字号 */
+  private fitTranslatedFontSizeToBox() {
+    if (!this.translatedLine || !this.subtitleBox) return;
+    const box = this.subtitleBox;
+    let px = parseInt(this.translatedLine.style.fontSize || '22', 10) || 22;
+    while (px >= MIN_TRANSLATED_FONT_PX && box.scrollHeight > box.clientHeight) {
+      px -= 2;
+      this.translatedLine.style.fontSize = `${px}px`;
+    }
+  }
+
+  private clearSubtitle() {
+    this.lastOriginalText = '';
+
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+
+    this.hideLoading();
+    if (this.overlay) {
+      this.overlay.style.display = 'none';
+    }
+    if (this.originalLine) {
+      this.originalLine.textContent = '';
+    }
+    if (this.translatedLine) {
+      this.translatedLine.textContent = '';
+    }
+  }
+
+  private toggleTranslation() {
+    if (!this.state.enabled) {
+      if (this.debounceTimer) {
+        clearTimeout(this.debounceTimer);
+        this.debounceTimer = null;
+      }
+
+      this.clearSubtitle();
+      this.cache.clear();
+      this.translationQueue.clear();
+
+      // 禁用翻译时隐藏 overlay
+      if (this.overlay) {
+        this.overlay.style.display = 'none';
+      }
+    }
+  }
+}
+
+// 等待页面加载完成后初始化
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    new SubtitleTranslator();
+  });
+} else {
+  new SubtitleTranslator();
+}
+
+export {};
+

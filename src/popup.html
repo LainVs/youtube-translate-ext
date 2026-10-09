@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube 双语字幕翻译</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>YouTube 双语字幕</h1>
+      <span class="ver">v0.1.0</span>
+    </header>
+
+    <section>
+      <label class="row">
+        <span>启用翻译</span>
+        <input type="checkbox" id="enabled" class="switch" />
+      </label>
+      <label class="row">
+        <span>双语显示（原文 + 译文）</span>
+        <input type="checkbox" id="bilingual" class="switch" />
+      </label>
+      <label class="row">
+        <span>隐藏 YouTube 原生字幕</span>
+        <input type="checkbox" id="hideNative" class="switch" />
+      </label>
+    </section>
+
+    <section>
+      <div class="title">目标语言</div>
+      <select id="targetLang"></select>
+
+      <div class="title">原字幕语言</div>
+      <select id="trackLang"></select>
+    </section>
+
+    <section>
+      <div class="title">翻译引擎</div>
+      <select id="translator">
+        <option value="google">Google 免费端点（无需 Key）</option>
+        <option value="ai">AI 翻译（OpenAI 兼容接口）</option>
+      </select>
+
+      <div id="aiBox" class="ai-box">
+        <label class="col">
+          <span>接口地址 Base URL</span>
+          <input type="text" id="aiBaseUrl" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label class="col">
+          <span>API Key</span>
+          <input type="password" id="aiApiKey" placeholder="sk-..." />
+        </label>
+        <label class="col">
+          <span>模型</span>
+          <input type="text" id="aiModel" placeholder="gpt-4o-mini" />
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <div class="title">样式</div>
+
+      <div class="grid2">
+        <label class="col">
+          <span>原文字体颜色</span>
+          <input type="color" id="originalColor" />
+        </label>
+        <label class="col">
+          <span>译文字体颜色</span>
+          <input type="color" id="translatedColor" />
+        </label>
+      </div>
+
+      <div class="grid2">
+        <label class="col">
+          <span>原文字号 <b id="originalSizeVal"></b>px</span>
+          <input type="range" id="originalSize" min="12" max="40" step="1" />
+        </label>
+        <label class="col">
+          <span>译文字号 <b id="translatedSizeVal"></b>px</span>
+          <input type="range" id="translatedSize" min="12" max="48" step="1" />
+        </label>
+      </div>
+
+      <label class="col">
+        <span>整体缩放比例 <b id="fontScaleVal"></b>×</span>
+        <input type="range" id="fontScale" min="0.5" max="2" step="0.1" />
+      </label>
+    </section>
+
+    <footer>
+      <button id="reset">恢复默认</button>
+      <span id="saved" class="saved"></span>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

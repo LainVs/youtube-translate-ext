@@ -1,0 +1,715 @@
+/**
+ * content.js — YouTube 双语字幕翻译 Content Script
+ *
+ * 思路：
+ *   1. 从 ytInitialPlayerResponse 拿字幕轨道(captionTracks)
+ *   2. 拼接 &fmt=json3 拉全片带时间轴字幕
+ *   3. 批量送去 background 翻译（Google 免费端点 / AI），带缓存
+ *   4. 自己在播放器上渲染“原文 + 译文”双语字幕
+ *   5. 用 video.currentTime 做时间同步
+ */
+
+(function () {
+  "use strict";
+
+  const LOG_PREFIX = "[YT双语字幕]";
+
+  const DEFAULTS = {
+    enabled: true,
+    bilingual: true,
+    hideNative: false,
+    targetLang: "zh-CN",
+    translator: "google", // google | ai
+    // AI（OpenAI 兼容接口）
+    aiBaseUrl: "https://api.openai.com/v1",
+    aiApiKey: "",
+    aiModel: "gpt-4o-mini",
+    // 样式
+    originalColor: "#ffffff",
+    translatedColor: "#a7e8ff",
+    originalSize: 18,
+    translatedSize: 24,
+    fontScale: 1,
+    // 选定的原始字幕语言（空 = 自动）
+    trackLang: "",
+  };
+
+  let config = Object.assign({}, DEFAULTS);
+
+  // ============================== 运行时状态 ==============================
+  let currentVideoId = null;
+  let loadToken = 0;
+
+  let cueList = [];               // [{ start, end, dur, text }]
+  const translationCache = new Map(); // cacheKey -> 译文
+
+  let wrapper = null;             // 全尺寸定位层
+  let box = null;                 // 字幕框
+  let originalEl = null;
+  let translatedEl = null;
+  let statusEl = null;
+
+  let lastIndex = -1;
+  let syncTimer = null;
+  let adTimer = null;
+  let isAdPlaying = false;
+  let position = null;            // { left, bottom }
+  let playerEl = null;
+
+  // ============================== 启动 ==============================
+  boot();
+
+  async function boot() {
+    await loadConfig();
+    watchConfig();
+    startAdDetection();
+    watchNavigation();
+    handleVideoChange(getVideoId());
+  }
+
+  function loadConfig() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.sync.get(DEFAULTS, (stored) => {
+          config = Object.assign({}, DEFAULTS, stored || {});
+          chrome.storage.sync.get(["subtitlePosition"], (r) => {
+            position = r && r.subtitlePosition ? r.subtitlePosition : null;
+            resolve();
+          });
+        });
+      } catch (e) {
+        resolve();
+      }
+    });
+  }
+
+  function watchConfig() {
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "sync") return;
+        const next = Object.assign({}, config);
+        let needRetranslate = false;
+        let needRestyle = false;
+
+        for (const key of Object.keys(changes)) {
+          if (key === "subtitlePosition") continue;
+          next[key] = changes[key].newValue;
+          if (["targetLang", "translator", "aiBaseUrl", "aiApiKey", "aiModel"].includes(key)) {
+            needRetranslate = true;
+          }
+          if (["originalColor", "translatedColor", "originalSize", "translatedSize", "fontScale", "bilingual"].includes(key)) {
+            needRestyle = true;
+          }
+        }
+
+        const wasEnabled = config.enabled;
+        const wasHideNative = config.hideNative;
+        config = next;
+
+        if (config.hideNative !== wasHideNative) applyNativeVisibility();
+        if (needRestyle) applyStyles();
+
+        if (needRetranslate) {
+          translationCache.clear();
+        }
+
+        if (!wasEnabled && config.enabled) {
+          // 重新打开
+          if (cueList.length) {
+            ensureTranslations();
+            startSync();
+          } else {
+            handleVideoChange(getVideoId(), true);
+          }
+        } else if (wasEnabled && !config.enabled) {
+          stopSync();
+          if (box) box.style.display = "none";
+        } else if (config.enabled) {
+          if (box) box.style.display = "";
+          if (needRetranslate && cueList.length) ensureTranslations();
+          renderCue(lastIndex, true);
+        }
+      });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  // ============================== 页面/视频切换 ==============================
+  function getVideoId() {
+    try {
+      return new URLSearchParams(location.search).get("v") || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function watchNavigation() {
+    // YouTube 自带的导航完成事件
+    window.addEventListener("yt-navigate-finish", onNav, true);
+    // 兜底：轮询 URL
+    let lastHref = location.href;
+    setInterval(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        onNav();
+      }
+    }, 1000);
+  }
+
+  function onNav() {
+    const id = getVideoId();
+    if (id !== currentVideoId) handleVideoChange(id);
+  }
+
+  async function handleVideoChange(videoId, force) {
+    if (!videoId) {
+      cleanup();
+      return;
+    }
+    if (!force && videoId === currentVideoId) return;
+
+    const token = ++loadToken;
+    currentVideoId = videoId;
+    cleanupUI();
+    cueList = [];
+    translationCache.clear();
+    lastIndex = -1;
+
+    if (!config.enabled) return;
+
+    await waitForPlayer();
+    if (token !== loadToken) return;
+
+    const playerResponse = await getPlayerResponse();
+    if (token !== loadToken) return;
+
+    const tracks = extractTracks(playerResponse);
+    if (!tracks || tracks.length === 0) {
+      LOG("该视频没有可用字幕轨道");
+      return;
+    }
+
+    const track = pickTrack(tracks);
+    if (!track) return;
+
+    const cues = await fetchCues(track.baseUrl);
+    if (token !== loadToken) return;
+    if (!cues.length) {
+      LOG("字幕内容为空");
+      return;
+    }
+
+    cueList = cues;
+    LOG(`已加载 ${cueList.length} 条字幕`);
+
+    createOverlay();
+    applyStyles();
+    applyNativeVisibility();
+    startSync();
+    renderCue(-1, true);
+
+    ensureTranslations(); // 后台批量翻译
+  }
+
+  function waitForPlayer() {
+    return new Promise((resolve) => {
+      const check = () => {
+        const el =
+          document.querySelector("#movie_player") ||
+          document.querySelector(".html5-video-player") ||
+          document.querySelector("video");
+        if (el) {
+          playerEl = el;
+          resolve(el);
+          return;
+        }
+        requestAnimationFrame(check);
+      };
+      check();
+    });
+  }
+
+  // ============================== 获取字幕数据 ==============================
+  async function getPlayerResponse() {
+    // 1) 页面全局变量
+    if (window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.captions) {
+      return window.ytInitialPlayerResponse;
+    }
+    // 2) 页面内联脚本
+    const fromScript = parseFromScripts();
+    if (fromScript) return fromScript;
+    // 3) 兜底：请求 watch 页
+    try {
+      const html = await (await fetch(location.href, { credentials: "include" })).text();
+      return extractJsonAfter(html, "ytInitialPlayerResponse");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function parseFromScripts() {
+    const scripts = document.querySelectorAll("script");
+    for (const s of scripts) {
+      const txt = s.textContent;
+      if (!txt || txt.indexOf("ytInitialPlayerResponse") === -1) continue;
+      const parsed = extractJsonAfter(txt, "ytInitialPlayerResponse");
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  /** 从文本中定位 marker 后的第一个 JSON 对象（花括号计数，字符串安全） */
+  function extractJsonAfter(text, marker) {
+    const markerIdx = text.indexOf(marker);
+    if (markerIdx < 0) return null;
+    const start = text.indexOf("{", markerIdx);
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(text.slice(start, i + 1));
+          } catch (e) {
+            return null;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function extractTracks(playerResponse) {
+    if (!playerResponse) return null;
+    return (
+      (playerResponse.captions &&
+        playerResponse.captions.playerCaptionsTracklistRenderer &&
+        playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks) ||
+      null
+    );
+  }
+
+  function pickTrack(tracks) {
+    // 指定语言优先
+    if (config.trackLang) {
+      const exact = tracks.find((t) => t.languageCode === config.trackLang);
+      if (exact) return exact;
+    }
+    const target = config.targetLang || "";
+    const base = target.split("-")[0];
+
+    // 优先英文
+    const en = tracks.find((t) => t.languageCode === "en");
+    if (en) return en;
+
+    // 优先与目标语言不同的
+    const other = tracks.find((t) => {
+      const code = (t.languageCode || "").split("-")[0];
+      return code !== base;
+    });
+    if (other) return other;
+
+    return tracks[0];
+  }
+
+  async function fetchCues(baseUrl) {
+    if (!baseUrl) return [];
+    const url = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
+    let data;
+    try {
+      const resp = await fetch(url, { credentials: "include" });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      data = await resp.json();
+    } catch (e) {
+      LOG("拉取字幕失败:", e.message);
+      return [];
+    }
+
+    const cues = [];
+    for (const ev of data.events || []) {
+      if (!ev.segs) continue;
+      let text = ev.segs.map((s) => s.utf8 || "").join("");
+      text = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+      if (!text) continue;
+      cues.push({ start: ev.tStartMs || 0, dur: ev.dDurationMs || 0, text });
+    }
+
+    cues.sort((a, b) => a.start - b.start);
+
+    // 计算结束时间，并合并相邻完全相同的文本
+    const merged = [];
+    for (let i = 0; i < cues.length; i++) {
+      const c = cues[i];
+      const next = cues[i + 1];
+      const end = c.start + (c.dur > 0 ? c.dur : next ? next.start - c.start : 4000);
+      const prev = merged[merged.length - 1];
+      if (prev && prev.text === c.text && c.start <= prev.end + 200) {
+        prev.end = Math.max(prev.end, end);
+        continue;
+      }
+      merged.push({ start: c.start, end: Math.max(end, c.start + 300), dur: c.dur, text: c.text });
+    }
+    return merged;
+  }
+
+  // ============================== 翻译 ==============================
+  function cacheKey(text) {
+    return config.translator + "|" + config.targetLang + "|" + text;
+  }
+
+  async function ensureTranslations() {
+    if (!cueList.length || !config.enabled) return;
+    const token = loadToken;
+
+    const texts = [];
+    const seen = new Set();
+    for (const c of cueList) {
+      if (!seen.has(c.text)) {
+        seen.add(c.text);
+        texts.push(c.text);
+      }
+    }
+
+    const pending = texts.filter((t) => !translationCache.has(cacheKey(t)));
+    if (!pending.length) return;
+
+    if (statusEl) {
+      statusEl.textContent = "翻译中… 0/" + pending.length;
+      statusEl.style.display = "";
+    }
+
+    const CHUNK = 12;
+    let done = 0;
+
+    for (let i = 0; i < pending.length; i += CHUNK) {
+      if (token !== loadToken || !config.enabled) return;
+      const chunk = pending.slice(i, i + CHUNK);
+
+      const res = await sendBg("TRANSLATE_BATCH", {
+        texts: chunk,
+        config: {
+          translator: config.translator,
+          targetLang: config.targetLang,
+          aiBaseUrl: config.aiBaseUrl,
+          aiApiKey: config.aiApiKey,
+          aiModel: config.aiModel,
+        },
+      });
+
+      if (res && Array.isArray(res.translations)) {
+        for (let j = 0; j < chunk.length; j++) {
+          const tr = res.translations[j];
+          if (typeof tr === "string" && tr) translationCache.set(cacheKey(chunk[j]), tr);
+        }
+      } else if (res && res.error) {
+        LOG("翻译错误:", res.error);
+        if (statusEl) statusEl.textContent = "翻译失败：" + res.error;
+        await sleep(800);
+      }
+
+      done += chunk.length;
+      if (statusEl) statusEl.textContent = "翻译中… " + done + "/" + pending.length;
+      renderCue(lastIndex, true);
+      await sleep(120);
+    }
+
+    if (statusEl) {
+      statusEl.textContent = "已翻译 " + done + " 条";
+      setTimeout(() => {
+        if (statusEl) statusEl.style.display = "none";
+      }, 1500);
+    }
+    renderCue(lastIndex, true);
+  }
+
+  function sendBg(type, payload) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(Object.assign({ type }, payload), (r) => {
+          if (chrome.runtime.lastError) resolve({ error: chrome.runtime.lastError.message });
+          else resolve(r);
+        });
+      } catch (e) {
+        resolve({ error: String(e) });
+      }
+    });
+  }
+
+  // ============================== 字幕渲染 ==============================
+  function createOverlay() {
+    if (wrapper && wrapper.isConnected) return;
+
+    if (!playerEl || !playerEl.isConnected) {
+      playerEl = document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
+    }
+    if (!playerEl) return;
+
+    if (getComputedStyle(playerEl).position === "static") {
+      playerEl.style.position = "relative";
+    }
+
+    wrapper = document.createElement("div");
+    wrapper.id = "ytbs-wrapper";
+
+    box = document.createElement("div");
+    box.id = "ytbs-box";
+
+    const handle = document.createElement("div");
+    handle.id = "ytbs-handle";
+    handle.textContent = "⠿";
+    handle.title = "拖动调整位置";
+
+    originalEl = document.createElement("div");
+    originalEl.className = "ytbs-line ytbs-original";
+
+    translatedEl = document.createElement("div");
+    translatedEl.className = "ytbs-line ytbs-translated";
+
+    statusEl = document.createElement("div");
+    statusEl.id = "ytbs-status";
+    statusEl.style.display = "none";
+
+    box.appendChild(handle);
+    box.appendChild(originalEl);
+    box.appendChild(translatedEl);
+    box.appendChild(statusEl);
+    wrapper.appendChild(box);
+    playerEl.appendChild(wrapper);
+
+    enableDrag(handle);
+    applyPosition();
+  }
+
+  function applyPosition() {
+    if (!wrapper) return;
+    if (position && typeof position.left === "number" && typeof position.bottom === "number") {
+      wrapper.style.left = position.left + "px";
+      wrapper.style.bottom = position.bottom + "px";
+      wrapper.style.transform = "none";
+    } else {
+      wrapper.style.left = "50%";
+      wrapper.style.bottom = "80px";
+      wrapper.style.transform = "translateX(-50%)";
+    }
+  }
+
+  function applyStyles() {
+    if (!box) return;
+    const s = config.fontScale || 1;
+    if (originalEl) {
+      originalEl.style.color = config.originalColor;
+      originalEl.style.fontSize = Math.round((config.originalSize || 18) * s) + "px";
+    }
+    if (translatedEl) {
+      translatedEl.style.color = config.translatedColor;
+      translatedEl.style.fontSize = Math.round((config.translatedSize || 24) * s) + "px";
+    }
+    if (originalEl) originalEl.style.display = config.bilingual ? "" : "none";
+  }
+
+  function applyNativeVisibility() {
+    let style = document.getElementById("ytbs-native-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "ytbs-native-style";
+      document.documentElement.appendChild(style);
+    }
+    style.textContent = config.hideNative
+      ? ".ytp-caption-window-container{display:none !important;}"
+      : "";
+  }
+
+  function startSync() {
+    stopSync();
+    syncTimer = setInterval(tick, 100);
+  }
+
+  function stopSync() {
+    if (syncTimer) {
+      clearInterval(syncTimer);
+      syncTimer = null;
+    }
+  }
+
+  function tick() {
+    if (!config.enabled) return;
+    if (!wrapper || !wrapper.isConnected) {
+      if (playerEl && playerEl.isConnected) createOverlay();
+    }
+    if (isAdPlaying) return;
+
+    const v = document.querySelector("video");
+    if (!v) return;
+    const t = v.currentTime * 1000;
+    const idx = findCue(t);
+    if (idx !== lastIndex) {
+      lastIndex = idx;
+      renderCue(idx);
+    }
+  }
+
+  function findCue(t) {
+    const n = cueList.length;
+    if (!n) return -1;
+    // 二分找最后一个 start <= t
+    let lo = 0;
+    let hi = n - 1;
+    let res = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (cueList[mid].start <= t) {
+        res = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (res < 0) return -1;
+    // 向前回溯几条，处理重叠
+    for (let i = res; i >= 0 && i >= res - 3; i--) {
+      if (t >= cueList[i].start && t <= cueList[i].end) return i;
+    }
+    return -1;
+  }
+
+  function renderCue(idx, force) {
+    if (!box || !originalEl || !translatedEl) return;
+    if (!config.enabled) return;
+
+    if (idx < 0 || !cueList[idx]) {
+      originalEl.textContent = "";
+      translatedEl.textContent = "";
+      if (!force) box.style.visibility = "hidden";
+      box.style.visibility = "hidden";
+      return;
+    }
+    box.style.visibility = "visible";
+    const cue = cueList[idx];
+    originalEl.textContent = cue.text;
+
+    const tr = translationCache.get(cacheKey(cue.text));
+    translatedEl.textContent = tr || "…";
+  }
+
+  // ============================== 广告检测 ==============================
+  function startAdDetection() {
+    adTimer = setInterval(() => {
+      const player = document.querySelector("#movie_player");
+      let ad = false;
+      if (player) {
+        ad =
+          player.classList.contains("ad-showing") ||
+          player.classList.contains("ad-interrupting");
+      }
+      if (!ad) {
+        ad = !!document.querySelector(".ytp-ad-player-overlay, .ytp-ad-skip-button");
+      }
+      if (ad && !isAdPlaying) {
+        isAdPlaying = true;
+        if (box) box.style.display = "none";
+      } else if (!ad && isAdPlaying) {
+        isAdPlaying = false;
+        if (box && config.enabled) box.style.display = "";
+      }
+    }, 800);
+  }
+
+  // ============================== 拖拽 ==============================
+  function enableDrag(handle) {
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startBottom = 0;
+
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragging = true;
+      const rect = wrapper.getBoundingClientRect();
+      const parentRect = playerEl.getBoundingClientRect();
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = rect.left - parentRect.left;
+      startBottom = parentRect.bottom - rect.bottom;
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+
+    function onMove(e) {
+      if (!dragging) return;
+      const parentRect = playerEl.getBoundingClientRect();
+      const boxRect = box.getBoundingClientRect();
+      let left = startLeft + (e.clientX - startX);
+      let bottom = startBottom - (e.clientY - startY);
+      left = Math.max(0, Math.min(left, parentRect.width - boxRect.width));
+      bottom = Math.max(0, Math.min(bottom, parentRect.height - boxRect.height));
+      wrapper.style.transform = "none";
+      wrapper.style.left = left + "px";
+      wrapper.style.bottom = bottom + "px";
+    }
+
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      position = {
+        left: parseFloat(wrapper.style.left) || 0,
+        bottom: parseFloat(wrapper.style.bottom) || 80,
+      };
+      try {
+        chrome.storage.sync.set({ subtitlePosition: position });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  // ============================== 清理 ==============================
+  function cleanupUI() {
+    stopSync();
+    if (wrapper && wrapper.isConnected) wrapper.remove();
+    wrapper = null;
+    box = null;
+    originalEl = null;
+    translatedEl = null;
+    statusEl = null;
+    applyNativeVisibility();
+  }
+
+  function cleanup() {
+    loadToken++;
+    cleanupUI();
+    cueList = [];
+    translationCache.clear();
+    lastIndex = -1;
+    currentVideoId = null;
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function LOG() {
+    try {
+      console.log.apply(console, [LOG_PREFIX].concat(Array.prototype.slice.call(arguments)));
+    } catch (e) {
+      /* ignore */
+    }
+  }
+})();

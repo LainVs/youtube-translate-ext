@@ -1,0 +1,70 @@
+/* YouTube 双语字幕 — 字幕层样式 */
+
+#ytbs-wrapper {
+  position: absolute;
+  z-index: 60;
+  pointer-events: none;
+  max-width: 92%;
+}
+
+#ytbs-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.68);
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+#ytbs-handle {
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  width: 22px;
+  height: 22px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  cursor: move;
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  user-select: none;
+}
+
+#ytbs-wrapper:hover #ytbs-handle {
+  opacity: 1;
+}
+
+.ytbs-line {
+  display: block;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "YouTube Sans", "Roboto", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+.ytbs-original {
+  font-weight: 400;
+  opacity: 0.9;
+}
+
+.ytbs-translated {
+  font-weight: 600;
+}
+
+#ytbs-status {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9be89b;
+  opacity: 0.85;
+  font-family: system-ui, sans-serif;
+}
