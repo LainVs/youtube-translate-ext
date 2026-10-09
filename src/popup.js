@@ -9,15 +9,82 @@ const DEFAULTS = {
   aiBaseUrl: "http://localhost:8788/v1",
   aiApiKey: "",
   aiModel: "opencode/big-pickle",
-  originalColor: "#ffffff",
-  translatedColor: "#a7e8ff",
-  originalSize: 18,
-  translatedSize: 24,
+  originalColor: "#2ee62e",
+  translatedColor: "#ffd633",
+  originalSize: 32,
+  translatedSize: 34,
   fontScale: 1,
+  bgColor: "#000000",
+  bgOpacity: 0,
+  boxRadius: 0,
+  boxPadding: 0,
+  outline: 2,
+  stylePreset: "nobg",
   exportFormat: "srt",
   exportMode: "bilingual",
   trackLang: "",
 };
+
+/**
+ * 风格预设：一键套用，用户不需要碰任何取色器/滑块。
+ * 每项只覆盖样式键，不碰启用/语言/翻译引擎等。
+ */
+const PRESETS = {
+  // 无框大字：透明底 + 强描边，靠描边在任意画面上保持可读（用户偏好的样式）
+  nobg: {
+    originalColor: "#2ee62e",
+    translatedColor: "#ffd633",
+    originalSize: 32,
+    translatedSize: 34,
+    fontScale: 1,
+    bgColor: "#000000",
+    bgOpacity: 0,
+    boxRadius: 0,
+    boxPadding: 0,
+    outline: 2,
+  },
+  // 影院黑底：圆角黑框，对比最强，背景再乱也稳
+  cinema: {
+    originalColor: "#2ee62e",
+    translatedColor: "#ffd633",
+    originalSize: 20,
+    translatedSize: 26,
+    fontScale: 1,
+    bgColor: "#000000",
+    bgOpacity: 62,
+    boxRadius: 10,
+    boxPadding: 10,
+    outline: 0,
+  },
+  // 护眼柔和：无框但用中性白/暖黄，久看不刺眼
+  soft: {
+    originalColor: "#f0f0f0",
+    translatedColor: "#ffc94d",
+    originalSize: 30,
+    translatedSize: 32,
+    fontScale: 1,
+    bgColor: "#000000",
+    bgOpacity: 0,
+    boxRadius: 0,
+    boxPadding: 0,
+    outline: 2,
+  },
+  // 磨砂浮层：半透明深色底，浅色/复杂背景下最稳
+  frost: {
+    originalColor: "#ffffff",
+    translatedColor: "#ffd633",
+    originalSize: 22,
+    translatedSize: 28,
+    fontScale: 1,
+    bgColor: "#101014",
+    bgOpacity: 50,
+    boxRadius: 14,
+    boxPadding: 14,
+    outline: 1,
+  },
+};
+
+const PRESET_KEYS = Object.keys(PRESETS.nobg);
 
 const TARGET_LANGS = [
   ["zh-CN", "简体中文"],
@@ -63,6 +130,7 @@ async function init() {
 
   updateAiBox();
   updateLabels();
+  markPreset(stored.stylePreset);
   bindEvents();
 }
 
@@ -135,6 +203,32 @@ function updateLabels() {
   $("originalSizeVal").textContent = $("originalSize").value;
   $("translatedSizeVal").textContent = $("translatedSize").value;
   $("fontScaleVal").textContent = Number($("fontScale").value).toFixed(1);
+  $("bgOpacityVal").textContent = $("bgOpacity").value;
+  $("boxRadiusVal").textContent = $("boxRadius").value;
+  $("boxPaddingVal").textContent = $("boxPadding").value;
+}
+
+/** 把预设写进控件 + 标高亮当前预设 */
+function markPreset(name) {
+  document.querySelectorAll("#presets .preset").forEach((b) => {
+    b.classList.toggle("active", b.dataset.preset === name);
+  });
+}
+
+/** 一键套用预设：写控件 → 存盘 → 立刻预览高亮 */
+async function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!p) return;
+  const patch = Object.assign({}, p);
+  PRESET_KEYS.forEach((k) => {
+    const el = $(k);
+    if (el) el.value = patch[k];
+  });
+  // outline 是 select，也要同步
+  $("outline").value = String(patch.outline);
+  updateLabels();
+  markPreset(name);
+  await save(Object.assign({ stylePreset: name }, patch));
 }
 
 function bindEvents() {
@@ -148,12 +242,16 @@ function bindEvents() {
     "translator",
     "originalColor",
     "translatedColor",
+    "bgColor",
+    "outline",
     "exportFormat",
     "exportMode",
   ].forEach((id) => {
     $(id).addEventListener("change", () => {
       const el = $(id);
       const value = el.type === "checkbox" ? el.checked : el.value;
+      // 手动改样式就不再高亮预设（提示「你已经在预设之外微调了」）
+      if (PRESET_KEYS.includes(id) || id === "outline") markPreset(null);
       save({ [id]: value });
       if (id === "translator") updateAiBox();
     });
@@ -165,11 +263,17 @@ function bindEvents() {
   });
 
   // 滑块
-  ["originalSize", "translatedSize", "fontScale"].forEach((id) => {
+  ["originalSize", "translatedSize", "fontScale", "bgOpacity", "boxRadius", "boxPadding"].forEach((id) => {
     $(id).addEventListener("input", () => {
       updateLabels();
+      if (PRESET_KEYS.includes(id)) markPreset(null);
       save({ [id]: Number($(id).value) });
     });
+  });
+
+  // 风格预设：一键套用
+  document.querySelectorAll("#presets .preset").forEach((btn) => {
+    btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
   });
 
   // 导出

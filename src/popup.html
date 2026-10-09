@@ -9,7 +9,7 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.2.1</span>
+      <span class="ver">v0.3.2</span>
     </header>
 
     <div id="fatal" class="fatal" style="display: none"></div>
@@ -61,7 +61,34 @@
     </section>
 
     <section>
-      <div class="title">样式</div>
+      <div class="title">风格预设<span class="hint">点一下就套用，不用自己调</span></div>
+
+      <div class="presets" id="presets">
+        <button class="preset" data-preset="nobg">
+          <span class="pv pv-nobg"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">无框大字</span>
+          <span class="pd">透明底 + 强描边，最清爽</span>
+        </button>
+        <button class="preset" data-preset="cinema">
+          <span class="pv pv-cinema"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">影院黑底</span>
+          <span class="pd">圆角黑框，稳、对比强</span>
+        </button>
+        <button class="preset" data-preset="soft">
+          <span class="pv pv-soft"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">护眼柔和</span>
+          <span class="pd">无框中性色，久看不累</span>
+        </button>
+        <button class="preset" data-preset="frost">
+          <span class="pv pv-frost"><i class="o">English text</i><i class="t">中文字幕</i></span>
+          <span class="pn">磨砂浮层</span>
+          <span class="pd">半透明底，背景乱时用</span>
+        </button>
+      </div>
+    </section>
+
+    <section>
+      <div class="title">样式微调</div>
 
       <div class="grid2">
         <label class="col">
@@ -71,6 +98,17 @@
         <label class="col">
           <span>译文字体颜色</span>
           <input type="color" id="translatedColor" />
+        </label>
+      </div>
+
+      <div class="grid2">
+        <label class="col">
+          <span>字幕背景色</span>
+          <input type="color" id="bgColor" />
+        </label>
+        <label class="col">
+          <span>背景不透明度 <b id="bgOpacityVal"></b>%</span>
+          <input type="range" id="bgOpacity" min="0" max="100" step="5" />
         </label>
       </div>
 
@@ -88,6 +126,26 @@
       <label class="col">
         <span>整体缩放比例 <b id="fontScaleVal"></b>×</span>
         <input type="range" id="fontScale" min="0.5" max="2" step="0.1" />
+      </label>
+
+      <div class="grid2">
+        <label class="col">
+          <span>背景圆角 <b id="boxRadiusVal"></b>px</span>
+          <input type="range" id="boxRadius" min="0" max="24" step="1" />
+        </label>
+        <label class="col">
+          <span>背景内边距 <b id="boxPaddingVal"></b>px</span>
+          <input type="range" id="boxPadding" min="0" max="28" step="1" />
+        </label>
+      </div>
+
+      <label class="col">
+        <span>文字描边</span>
+        <select id="outline">
+          <option value="0">无</option>
+          <option value="1">柔和阴影</option>
+          <option value="2">强描边（无底色必备）</option>
+        </select>
       </label>
     </section>
 

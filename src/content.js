@@ -25,11 +25,20 @@
     aiApiKey: "",
     aiModel: "opencode/big-pickle",
     // 样式
-    originalColor: "#ffffff",
-    translatedColor: "#a7e8ff",
-    originalSize: 18,
-    translatedSize: 24,
+    originalColor: "#2ee62e",
+    translatedColor: "#ffd633",
+    originalSize: 32,
+    translatedSize: 34,
     fontScale: 1,
+    // 字幕背景
+    bgColor: "#000000",
+    bgOpacity: 0,
+    boxRadius: 0,
+    boxPadding: 0,
+    // 文字描边强度：0 无 / 1 柔和阴影 / 2 强描边（无底色时靠它保证可读）
+    outline: 2,
+    // 当前套用的风格预设（仅用于面板高亮）
+    stylePreset: "nobg",
     // 导出
     exportFormat: "srt", // srt | vtt | txt
     exportMode: "bilingual", // bilingual | translation | original
@@ -44,6 +53,14 @@
   let loadToken = 0;
   let lastError = "";
   let lastSource = "";
+  // DOM 实时字幕模式（读取 YouTube 自绘字幕，不依赖 timedtext 接口）
+  let domMode = false;
+  let domObserver = null;
+  let domCheckTimer = null;
+  let domLastText = "";
+  const domQueue = new Set();
+  let domQueueTimer = null;
+  let domHintTimer = null;
 
   let cueList = [];               // [{ start, end, dur, text }]
   const translationCache = new Map(); // cacheKey -> 译文
@@ -130,7 +147,7 @@
           if (["targetLang", "translator", "aiBaseUrl", "aiApiKey", "aiModel"].includes(key)) {
             needRetranslate = true;
           }
-          if (["originalColor", "translatedColor", "originalSize", "translatedSize", "fontScale", "bilingual"].includes(key)) {
+          if (["originalColor", "translatedColor", "originalSize", "translatedSize", "fontScale", "bilingual", "bgColor", "bgOpacity", "boxRadius", "boxPadding", "outline"].includes(key)) {
             needRestyle = true;
           }
         }
@@ -224,7 +241,7 @@
       const r = await askMain("GET_TRACKS", { videoId: videoId });
       if (r && r.error) lastError = r.error;
       tracks = (r && r.tracks) || [];
-      if (tracks.length) lastSource = "android";
+      if (tracks.length) lastSource = (r && r.source) || "android";
     } catch (e) {
       lastError = String((e && e.message) || e);
     }
@@ -252,8 +269,11 @@
     }
 
     if (!tracks || tracks.length === 0) {
-      LOG("该视频没有可用字幕轨道");
-      showToast("该视频没有可用字幕轨道" + (lastError ? "（" + lastError + "）" : "（需要视频本身带 CC 字幕）"), true);
+      // 拿不到轨道也别放弃：DOM 实时模式只需要原生字幕在屏幕上
+      LOG("拿不到字幕轨道, 转入 DOM 实时模式, 错误:", lastError);
+      await loadPersistentCache(videoId);
+      if (token !== loadToken) return;
+      startDomFallback(lastError || "no caption tracks");
       return;
     }
 
@@ -261,36 +281,70 @@
     if (!track) return;
 
     // 取字幕正文
+    //
+    // 两条路，顺序不能反：
+    //   A. 重放 baseUrl —— 只有 ANDROID 轨道的 baseUrl（ip=0.0.0.0 签名）能重复取，
+    //      成功时是毫秒级，所以先试它。
+    //   B. hook 播放器的请求 —— 页面 `ytInitialPlayerResponse` 里那份 baseUrl 带 PoToken，
+    //      是**一次性**的，重放只会得到 HTTP 200 + 空 body；而且 innertube 撞 403 时
+    //      根本拿不到可用 baseUrl。此时唯一的解法是截获播放器自己那一次请求的响应。
+    //      这条路用页面自己的合法身份（真 cookies + PoToken），所以**永远不会被 403**。
     let cues = [];
-    try {
-      const r = await askMain("GET_CUES", { baseUrl: track.baseUrl });
-      if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
-      else if (r && r.error && !lastError) lastError = r.error;
-    } catch (e) {
-      /* ignore */
-    }
-    if (!cues.length) {
+    const langCode = track.languageCode || "";
+    const replayable = !!track.baseUrl && !track.__fromPlayer;
+
+    if (replayable) {
       try {
-        const r = await sendBg("GET_CUES", { baseUrl: track.baseUrl });
+        const r = await askMain("GET_CUES", { baseUrl: track.baseUrl });
         if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
         else if (r && r.error && !lastError) lastError = r.error;
       } catch (e) {
         /* ignore */
       }
+      if (!cues.length) {
+        try {
+          const r = await sendBg("GET_CUES", { baseUrl: track.baseUrl });
+          if (r && r.body) cues = finalizeCues(parseCuesFromBody(r.body));
+          else if (r && r.error && !lastError) lastError = r.error;
+        } catch (e) {
+          /* ignore */
+        }
+      }
+      if (!cues.length) {
+        cues = await fetchCues(track.baseUrl); // 内容脚本直连兜底
+      }
+      if (token !== loadToken) return;
     }
+
     if (!cues.length) {
-      cues = await fetchCues(track.baseUrl); // 内容脚本直连兜底
+      try {
+        const r = await askMain("GET_CUES_VIA_PLAYER", { videoId: videoId, langCode: langCode }, 15000);
+        if (r && r.body) {
+          cues = finalizeCues(parseCuesFromBody(r.body));
+          if (cues.length) lastError = ""; // 拿到了就清掉上一步的残留错误
+        } else if (r && r.error) {
+          lastError = r.error;
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    if (!cues.length) {
+      cues = await fetchCues(track.baseUrl); // 最后兜底
     }
     if (token !== loadToken) return;
     if (!cues.length) {
-      LOG("字幕内容为空, 来源=" + lastSource + ", 错误=" + lastError);
-      showToast(
-        "字幕内容为空（来源 " + (lastSource || "?") + "）" + (lastError ? "：" + lastError : ""),
-        true
-      );
+      // 各路都失败 → DOM 实时模式兜底（只要原生字幕在屏幕上就能翻）
+      LOG("字幕正文为空, 转入 DOM 实时模式, 来源=" + lastSource + ", 错误=" + lastError);
+      cueList = [];
+      await loadPersistentCache(videoId);
+      if (token !== loadToken) return;
+      startDomFallback(lastError || "empty cues");
       return;
     }
 
+    stopDomMode(); // 预取成功，退出可能残留的实时模式
     cueList = cues;
     LOG(`已加载 ${cueList.length} 条字幕`);
 
@@ -631,34 +685,9 @@
     for (let i = 0; i < pending.length; i += CHUNK) {
       if (token !== loadToken || !config.enabled) return;
       const chunk = pending.slice(i, i + CHUNK);
-
-      const res = await sendBg("TRANSLATE_BATCH", {
-        texts: chunk,
-        config: {
-          translator: config.translator,
-          targetLang: config.targetLang,
-          aiBaseUrl: config.aiBaseUrl,
-          aiApiKey: config.aiApiKey,
-          aiModel: config.aiModel,
-        },
-      });
-
-      if (res && Array.isArray(res.translations)) {
-        for (let j = 0; j < chunk.length; j++) {
-          const tr = res.translations[j];
-          if (typeof tr === "string" && tr) translationCache.set(cacheKey(chunk[j]), tr);
-        }
-      } else if (res && res.error) {
-        LOG("翻译错误:", res.error);
-        if (statusEl) statusEl.textContent = "翻译失败：" + res.error;
-        showToast("翻译失败：" + res.error, true);
-        await sleep(800);
-      }
-
+      await runChunk(chunk, token);
       done += chunk.length;
       if (statusEl) statusEl.textContent = "翻译中… " + done + "/" + pending.length;
-      renderCue(lastIndex, true);
-      scheduleSavePersistent();
       await sleep(120);
     }
 
@@ -670,6 +699,38 @@
     }
     renderCue(lastIndex, true);
     savePersistentNow();
+  }
+
+  /** 翻译一批文本（预取模式与 DOM 实时模式共用） */
+  async function runChunk(chunk, token) {
+    if (!chunk || !chunk.length) return 0;
+    if (token !== loadToken || !config.enabled) return 0;
+    const res = await sendBg("TRANSLATE_BATCH", {
+      texts: chunk,
+      config: {
+        translator: config.translator,
+        targetLang: config.targetLang,
+        aiBaseUrl: config.aiBaseUrl,
+        aiApiKey: config.aiApiKey,
+        aiModel: config.aiModel,
+      },
+    });
+
+    if (res && Array.isArray(res.translations)) {
+      for (let j = 0; j < chunk.length; j++) {
+        const tr = res.translations[j];
+        if (typeof tr === "string" && tr) translationCache.set(cacheKey(chunk[j]), tr);
+      }
+    } else if (res && res.error) {
+      LOG("翻译错误:", res.error);
+      if (statusEl) statusEl.textContent = "翻译失败：" + res.error;
+      showToast("翻译失败：" + res.error, true);
+      await sleep(800);
+    }
+
+    renderCue(lastIndex, true);
+    scheduleSavePersistent();
+    return chunk.length;
   }
 
   // ---- 页面主世界桥（main-fetch.js 在 world: MAIN 中执行，避免被 YT 判为扩展流量）----
@@ -793,6 +854,36 @@
     }
   }
 
+  /** #rgb / #rrggbb -> rgba(r,g,b,a) */
+  function hexToRgba(hex, alpha) {
+    let h = String(hex || "").trim().replace(/^#/, "");
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    if (!/^[0-9a-fA-F]{6}$/.test(h)) return "rgba(0, 0, 0, " + alpha + ")";
+    const n = parseInt(h, 16);
+    return "rgba(" + ((n >> 16) & 255) + ", " + ((n >> 8) & 255) + ", " + (n & 255) + ", " + alpha + ")";
+  }
+
+  /** 描边强度 -> text-shadow。无底色时靠 2 级强描边保证任何画面上都读得清。 */
+  function outlineShadow(level) {
+    if (level >= 2) {
+      return [
+        "-1px -1px 0 #000",
+        "1px -1px 0 #000",
+        "-1px 1px 0 #000",
+        "1px 1px 0 #000",
+        "-2px -2px 0 #000",
+        "2px -2px 0 #000",
+        "-2px 2px 0 #000",
+        "2px 2px 0 #000",
+        "0 3px 7px rgba(0, 0, 0, 0.85)",
+      ].join(", ");
+    }
+    if (level === 1) {
+      return "0 2px 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.85)";
+    }
+    return "0 1px 2px rgba(0,0,0,0.9)";
+  }
+
   function applyStyles() {
     if (!box) return;
     const s = config.fontScale || 1;
@@ -805,6 +896,26 @@
       translatedEl.style.fontSize = Math.round((config.translatedSize || 24) * s) + "px";
     }
     if (originalEl) originalEl.style.display = config.bilingual ? "" : "none";
+
+    // 背景色 + 不透明度（0 = 完全透明）
+    let o = Number(config.bgOpacity);
+    if (!isFinite(o)) o = 0.68;
+    if (o > 1) o = o / 100; // >1 视为百分数（popup 存的就是 0-100）
+    o = Math.max(0, Math.min(1, o));
+    box.style.background = o > 0 ? hexToRgba(config.bgColor, o) : "transparent";
+
+    // 圆角 + 内边距
+    const r = Number(config.boxRadius);
+    const pd = Number(config.boxPadding);
+    const rr = isFinite(r) ? r : 10;
+    const pp = isFinite(pd) ? pd : 10;
+    box.style.borderRadius = rr + "px";
+    box.style.padding = pp + "px " + Math.round(pp * 1.8) + "px";
+
+    // 描边
+    const shadow = outlineShadow(Number(config.outline) || 0);
+    if (originalEl) originalEl.style.textShadow = shadow;
+    if (translatedEl) translatedEl.style.textShadow = shadow;
   }
 
   function applyNativeVisibility() {
@@ -817,6 +928,150 @@
     style.textContent = config.hideNative
       ? ".ytp-caption-window-container{display:none !important;}"
       : "";
+  }
+
+  // ======================= DOM 实时字幕模式（兜底，不走 timedtext）=======================
+  //
+  // "快捷翻译"这类成熟插件就是这样做的：不请求 YouTube 的字幕 API，
+  // 而是用 MutationObserver 直接读播放器已经画出来的原生字幕，读到一行翻一行。
+  // 好处是完全不受 PoToken 风控影响；代价是必须开着原生 CC，且没有全片时间轴（导出会只有已看到的部分）。
+
+  function nowMs() {
+    const v = document.querySelector("video");
+    return v ? Math.round(v.currentTime * 1000) : Date.now();
+  }
+
+  function readNativeCaption() {
+    try {
+      const win = document.querySelector(".ytp-caption-window-container");
+      if (!win) return "";
+      const segs = win.querySelectorAll(".ytp-caption-segment");
+      let text = "";
+      if (segs.length) {
+        for (const s of segs) {
+          const t = (s.textContent || "").replace(/\s+/g, " ").trim();
+          if (t) text += (text ? " " : "") + t;
+        }
+      } else {
+        text = (win.innerText || win.textContent || "").replace(/\s+/g, " ").trim();
+      }
+      return text;
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function startDomMode(reason) {
+    if (domMode) return;
+    domMode = true;
+    LOG("切换到 DOM 实时字幕模式:", reason || "");
+    showToast("预取字幕失败，已切换为实时模式（读取原生字幕，需打开 CC）");
+
+    const root =
+      document.querySelector("#movie_player") ||
+      document.querySelector(".html5-video-player") ||
+      document.body;
+    try {
+      domObserver = new MutationObserver(() => scheduleDomCheck());
+      domObserver.observe(root, { subtree: true, childList: true, characterData: true });
+    } catch (e) {
+      LOG("DOM 观察失败:", e.message);
+    }
+
+    scheduleDomCheck();
+
+    // 3 秒后还没读到原生字幕 → 大概率是原生 CC 没开
+    clearTimeout(domHintTimer);
+    domHintTimer = setTimeout(() => {
+      if (domMode && !cueList.length && !readNativeCaption()) {
+        showToast("未读到原生字幕：请点播放器右下角 CC 打开字幕（快捷键 c）", true);
+      }
+    }, 3000);
+  }
+
+  /** 统一降级入口：建覆盖层 + 启动同步 + 切到 DOM 实时模式 */
+  function startDomFallback(reason) {
+    createOverlay();
+    applyStyles();
+    applyNativeVisibility();
+    startSync();
+    startDomMode(reason);
+  }
+
+  function stopDomMode() {
+    if (domObserver) {
+      try {
+        domObserver.disconnect();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    domObserver = null;
+    clearTimeout(domCheckTimer);
+    domCheckTimer = null;
+    clearTimeout(domHintTimer);
+    domHintTimer = null;
+    if (domQueueTimer) clearTimeout(domQueueTimer);
+    domQueueTimer = null;
+    domQueue.clear();
+    domMode = false;
+    domLastText = "";
+  }
+
+  function scheduleDomCheck() {
+    if (domCheckTimer) return;
+    domCheckTimer = setTimeout(() => {
+      domCheckTimer = null;
+      checkDomCaption();
+    }, 100);
+  }
+
+  function checkDomCaption() {
+    if (!domMode || !config.enabled) return;
+    const text = readNativeCaption();
+    const now = nowMs();
+
+    if (text === domLastText) {
+      // 同一句还在，把结束时间往后延
+      const last = cueList[cueList.length - 1];
+      if (last && text) last.end = Math.max(last.end, now + 2500);
+      return;
+    }
+    domLastText = text;
+
+    if (!text) {
+      // 字幕消失：收短当前条，让 overlay 隐藏
+      const last = cueList[cueList.length - 1];
+      if (last && now > last.start + 200) last.end = now;
+      lastIndex = -1;
+      renderCue(-1, true);
+      return;
+    }
+
+    const last = cueList[cueList.length - 1];
+    if (last && last.text === text) {
+      last.end = now + 2500;
+    } else {
+      if (cueList.length >= 3000) cueList.shift(); // 防止无限增长
+      cueList.push({ start: now, end: now + 2500, dur: 2500, text: text });
+    }
+    lastIndex = cueList.length - 1;
+    renderCue(lastIndex, true);
+    requestDomTranslate(text);
+  }
+
+  /** 攒一小批再翻译，避免每翻一行都请求 */
+  function requestDomTranslate(text) {
+    if (translationCache.has(cacheKey(text))) return;
+    domQueue.add(text);
+    if (domQueueTimer) return;
+    domQueueTimer = setTimeout(() => {
+      domQueueTimer = null;
+      const chunk = Array.from(domQueue);
+      domQueue.clear();
+      if (!chunk.length || !domMode || !config.enabled) return;
+      runChunk(chunk, loadToken);
+    }, 400);
   }
 
   function startSync() {
@@ -837,6 +1092,9 @@
       if (playerEl && playerEl.isConnected) createOverlay();
     }
     if (isAdPlaying) return;
+
+    // DOM 实时模式由 MutationObserver 驱动渲染，不走二分时间轴
+    if (domMode) return;
 
     const v = document.querySelector("video");
     if (!v) return;
@@ -1068,6 +1326,7 @@
   // ============================== 清理 ==============================
   function cleanupUI() {
     stopSync();
+    stopDomMode();
     if (wrapper && wrapper.isConnected) wrapper.remove();
     wrapper = null;
     box = null;
