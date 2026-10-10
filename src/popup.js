@@ -35,6 +35,19 @@ const DEFAULTS = {
 /** 手动输入模型 ID 时下拉框用的特殊值 */
 const AI_MODEL_CUSTOM = "custom";
 
+/** 常用色：三处颜色（原文/译文/背景）共用这 8 个，一键点选 */
+const COMMON_COLORS = [
+  "#ffffff",
+  "#000000",
+  "#39ff6a",
+  "#ffe14d",
+  "#7fe3ff",
+  "#ffa62b",
+  "#ff6b6b",
+  "#f5f0e6",
+];
+const COLOR_KEYS = ["originalColor", "translatedColor", "bgColor"];
+
 const TARGET_LANGS = [
   ["zh-CN", "简体中文"],
   ["zh-TW", "繁體中文"],
@@ -83,6 +96,9 @@ async function init() {
     $("aiModelCustom").value = stored.aiModel || "";
   }
   updateModelCustomVisibility();
+
+  renderSwatches();
+  syncSwatches();
 
   updateAiBox();
   updateLabels();
@@ -185,6 +201,41 @@ function updateModelCustomVisibility() {
   $("aiModelCustomWrap").style.display = custom ? "" : "none";
 }
 
+/** 生成三处颜色的常用色卡 */
+function renderSwatches() {
+  COLOR_KEYS.forEach((key) => {
+    const box = $("sw_" + key);
+    if (!box) return;
+    box.innerHTML = "";
+    COMMON_COLORS.forEach((c) => {
+      const b = document.createElement("button");
+      b.className = "sw";
+      b.style.background = c;
+      b.title = c;
+      b.dataset.color = c;
+      b.dataset.for = key;
+      b.addEventListener("click", () => {
+        const el = $(key);
+        if (el) el.value = c;
+        save({ [key]: c });
+        syncSwatches(key);
+      });
+      box.appendChild(b);
+    });
+  });
+}
+
+/** 高亮与当前值一致的色卡（取色盘改了也要同步过来） */
+function syncSwatches(onlyKey) {
+  COLOR_KEYS.forEach((key) => {
+    if (onlyKey && key !== onlyKey) return;
+    const cur = String(($(key) && $(key).value) || "").toLowerCase();
+    document.querySelectorAll('#sw_' + key + " .sw").forEach((b) => {
+      b.classList.toggle("active", b.dataset.color === cur);
+    });
+  });
+}
+
 function bindEvents() {
   // 复选/下拉/颜色
   [
@@ -212,6 +263,8 @@ function bindEvents() {
       const value = el.type === "checkbox" ? el.checked : el.value;
       save({ [id]: value });
       if (id === "translator") updateAiBox();
+      // 高级取色盘改了，常用色卡的高亮同步过去
+      if (COLOR_KEYS.includes(id)) syncSwatches(id);
     });
   });
 
@@ -333,6 +386,7 @@ function bindEvents() {
     });
     $("aiModelCustom").value = "";
     updateModelCustomVisibility();
+    syncSwatches();
     updateAiBox();
     updateLabels();
     save(Object.assign({}, DEFAULTS));

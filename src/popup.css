@@ -75,6 +75,51 @@ section {
   gap: 10px;
 }
 
+/* 常用色卡：一排点选，比取色盘快得多 */
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.sw {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #3a3a40;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sw:hover {
+  border-color: #6a6a75;
+}
+
+.sw.active {
+  border-color: #4a8cff;
+  box-shadow: 0 0 0 1px #4a8cff;
+}
+
+/* 高级折叠区：原生取色盘收在这里 */
+details.adv {
+  margin: 8px 0 2px;
+  border: 1px solid #2d2d31;
+  border-radius: 8px;
+  padding: 6px 10px 10px;
+}
+
+details.adv summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #a9a9b0;
+  padding: 2px 0;
+}
+
+details.adv summary:hover {
+  color: #e8e8e8;
+}
+
 select,
 input[type="text"],
 input[type="password"] {
