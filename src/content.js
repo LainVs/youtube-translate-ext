@@ -586,7 +586,15 @@
       // 叠加后续的 " " + piece 连接后就出现双空格，译文里可能变成断词。
       let cut = hits[k].cut;
       while (/\s/.test(t.charAt(cut))) cut++;
-      if (!t.slice(cut).trim()) continue;
+      const tail = t.slice(cut);
+      if (!tail.trim()) continue;
+      // ⚠️ tail 必须像一个新句子的开头（大写字母 / 数字 / CJK），
+      // 否则很可能是 ASR 标点错误，把一句话从中间劈开了。
+      // 真实数据："…don't tell me your truth. to see."
+      // 的 "to see." 是上一句的延续（小写开头），切开会留下一个
+      // 2 词孤立残句；宁可保持粘连，也不要制造碎片。
+      const first = tail.replace(/^["'“”‘’（(\[]+/, "").charAt(0);
+      if (first && /[a-z]/.test(first)) continue;
       return cut;
     }
     return -1;
@@ -608,6 +616,11 @@
     // s = 句点之前的内容（不含句点），取最后一个词
     const tok = (String(s || "").match(/[A-Za-z.]+$/) || [""])[0];
     if (!tok) return false;
+    // ⚠️ "I" 永远不是缩写，它是代词"我"。
+    // 不加这个例外，"…and so do I. I feel…" 的 "I." 会被当成首字母缩写，
+    // 导致两个完整句粘在一起分不开（真实数据里实测踩到）。
+    // 小写 "a" 是冠词，也不可能是缩写；大写 "A" 保留（可能是 "A. Smith"）。
+    if (tok === "I" || tok === "i" || tok === "a") return false;
     if (tok.length === 1) return true; // J. K. 这类首字母
     if (tok.indexOf(".") >= 0) return true; // e.g. i.e. p.m. u.s.
     return ABBREVIATIONS.test(tok);
@@ -930,11 +943,16 @@
 
     // 小句一旦开始就整段显示（字幕惯例：不等说完再亮）
     // 这样每片平均 2~3 秒，视觉上是「一句一句」推进。
+    //
+    // ⚠️ 必须取 max 而不是「最后一个满足条件的」：
+    // ASR 相邻 cue 的时间窗本来就互相重叠，splitBuf 切完之后
+    // parts[] 里完全可能出现后一个 part 的 start 比前一个还早。
+    // 实测真实数据：parts=[[207582,211879],[206840,208100]] ——
+    // 用「最后一个」会让已显示的文本又缩回去，肉眼看到字幕倒退。
     let reached = 0;
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
-      if (t >= p.start) reached = p.endChar;
-      else break;
+      if (t >= p.start && p.endChar > reached) reached = p.endChar;
     }
     return reached;
   }
@@ -1061,11 +1079,22 @@
     cues.sort((a, b) => a.start - b.start);
 
     // 先算每条的结束时间
+    //
+    // ⚠️ ASR 的 d 是「识别窗口时长」，不是这句话真正说完的时间。
+    // 实测真实 json3：cue(39559, "feeling. Got to make you understand.", d=6281)
+    // 的原始 end = 45840，而下一句 "Never going to give you up." 在 43120 就开始了 ——
+    // 重叠 2.7 秒。直接用 start+dur 当结束时间，会让相邻两条字幕互相重叠，
+    // 而 findCue 只返回「start 更大且时间匹配」的那条：
+    // 实测 44 条字幕里有 3 条（7%）永远显示不出来，读者会觉得字幕漏句。
+    //
+    // 所以有下一句时，把结束时间压到下一句的开始时间。
+    // （人工字幕轨 d 准确，这个 clamp 依然成立：下一句开始就是上一句结束。）
     const withEnd = [];
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];
       const next = cues[i + 1];
-      const end = c.start + (c.dur > 0 ? c.dur : next ? next.start - c.start : 4000);
+      const rawEnd = c.start + (c.dur > 0 ? c.dur : next ? next.start - c.start : 4000);
+      const end = next && next.start > c.start + 100 ? Math.min(rawEnd, next.start) : rawEnd;
       withEnd.push({
         start: c.start,
         end: Math.max(end, c.start + 300),
@@ -1098,7 +1127,31 @@
     // 时会静默退回「不合并」，连带把 stripNonSpeech 也跳过了，
     // 于是 [音乐] 这类标记漏到画面上。
     if (bySentence === false) return stripAll(deduped);
-    return mergeCuesToSentences(deduped, maxChars, maxGapMs);
+    const merged = mergeCuesToSentences(deduped, maxChars, maxGapMs);
+    return deoverlap(merged);
+  }
+
+  /**
+   * 兜底去重叠：把每条的结束时间压到下一条的开始时间。
+   *
+   * 上面已经把 end 压到 next.start 了，但拆分/clamp 的组合仍可能漏出重叠，
+   * 而重叠的后果是实打实的：findCue 只返回 start 更大的那条，
+   * 前一条字幕整段不显示（读者看到的就是「字幕漏了一句话」）。
+   * 所以合成完之后再统一扫一遍，保证每个区间非空。
+   */
+  function deoverlap(list) {
+    if (!list || list.length < 2) return list || [];
+    for (let i = 0; i < list.length - 1; i++) {
+      const a = list[i];
+      const b = list[i + 1];
+      if (b.start < a.end) {
+        // 起点相同（连压 end 的余地都没有）时，也给前一条留一段
+        a.end = b.start > a.start ? b.start : a.start + 150;
+        if (a.end <= a.start) a.end = a.start + 150;
+        a.dur = a.end - a.start;
+      }
+    }
+    return list;
   }
 
   /** 解析 timedtext 响应：json3（JSON）或 srv3 / srv1（XML） */
