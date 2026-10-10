@@ -656,6 +656,58 @@
   }
 
   /**
+   * 从句分页断点：超长单句在「逗号/分号/冒号 + 并列连词」处分页显示。
+   *
+   * 背景：splitAll 只认句末标点（.!?），"…eight years old, and nobody…"
+   * 这种 140 字整句没有任何句末标点，会原样留到显示层，变成英 3 行 +
+   * 中 2 行共 5 行，一眼看不完。
+   *
+   * 注意和 findInnerSentenceEnd 的关键区别：那里切的是**数据**（时间轴、
+   * 翻译都跟着变），所以 tail 必须像新句子开头（大写守卫），切错的代价
+   * 很高。这里只切**显示**（翻译 key 仍是整句，时间轴不动），切错最多
+   * 就是翻页位置别扭一点，所以允许小写开头的 "and nobody…"。
+   *
+   * 安全绳（缺一不可）：
+   *   1. 整句超长才分（CLAUSE_MIN_LEN），短句原样；
+   *   2. 连词前必须有逗号/分号/冒号 —— "Tom and Jerry" 这种无标点的
+   *      并列结构碰都不碰；
+   *   3. 逗号前必须是字母或右引号/右括号 —— "1,000" 这种数字逗号不算；
+   *   4. 前后半都有最小长度 —— 拒绝碎片页。
+   * 多个候选取最接近中间的，前后页行数最均衡。
+   *
+   * @returns {number} 断点下标（逗号之后，含逗号归前半）；没有返回 -1
+   */
+  const CLAUSE_MIN_LEN = 100;
+  const CLAUSE_MIN_HEAD = 40;
+  const CLAUSE_MIN_TAIL = 25;
+  const CLAUSE_CONJ = /^(?:and|but|or|nor|so|yet)$/i;
+
+  function findClauseBreak(text) {
+    const t = String(text || "");
+    if (t.length <= CLAUSE_MIN_LEN) return -1;
+    const re = /[,;:：；]\s*([A-Za-z]+)/g;
+    let m;
+    let best = -1;
+    let bestScore = Infinity;
+    while ((m = re.exec(t)) !== null) {
+      if (!CLAUSE_CONJ.test(m[1])) continue;
+      const commaIdx = m.index;
+      const before = t.charAt(commaIdx - 1);
+      // 数字里的逗号（1,000）不算断点
+      if (!/[A-Za-z"'”’)\]】》」』]/.test(before)) continue;
+      const cut = commaIdx + 1; // 逗号归前半（尾逗号会被 incompleteMark 转成 …）
+      const tail = t.slice(cut).replace(/^\s+/, "");
+      if (cut < CLAUSE_MIN_HEAD || tail.length < CLAUSE_MIN_TAIL) continue;
+      const score = Math.abs(cut - t.length / 2);
+      if (score < bestScore) {
+        bestScore = score;
+        best = cut;
+      }
+    }
+    return best;
+  }
+
+  /**
    * 判断句点前的那个词是不是缩写 —— 它后面的点不能当句末标点。
    *
    * 实测会被误切的写法：
@@ -1010,6 +1062,20 @@
       if (t >= p.start && p.endChar > reached) reached = p.endChar;
     }
     return reached;
+  }
+
+  /**
+   * 分页用进度：0..cue.text.length，与揭示开关无关。
+   * 有 parts 就按真实 ASR 时间轴（和揭示同一口径，翻页点与说到哪严格对齐）；
+   * 没有 parts（极少数单碎片 cue）就按时间占比估算。
+   */
+  function pageProgress(cue, t) {
+    if (cue.parts && cue.parts.length) return spokenCharCount(cue, t);
+    const total = cue.text.length;
+    if (t >= cue.end) return total;
+    if (t <= cue.start) return 0;
+    const span = cue.end - cue.start;
+    return span > 0 ? Math.round((total * (t - cue.start)) / span) : total;
   }
 
   /**
@@ -2256,6 +2322,55 @@
       translatedEl.textContent = incompleteMark(sliceByRatio(tr, showRatio));
     } else {
       translatedEl.textContent = tr;
+    }
+
+    // 超长单句分页显示：不断句不断翻译，只分页。
+    // 翻译 key 仍是整句（质量零损失），时间轴不动（seek/导出/持久化全无感），
+    // 显示时按实际说到的进度翻页：前半说完才出现后半，不剧透。
+    // 短句 findClauseBreak 直接返回 -1，上面的老逻辑原样生效。
+    const cut = findClauseBreak(cue.text);
+    if (cut > 0) {
+      const tNow = typeof timeMs === "number" ? timeMs : nowMs();
+      const prog = pageProgress(cue, tNow);
+      const wholeLen = cue.text.length;
+      const head = cue.text.slice(0, cut);
+      const tail = cue.text.slice(cut).replace(/^\s+/, "");
+      // 译文按同比例切成两半（词边界对齐；中文无空格原样切）。
+      // 对不上（某半为空）就退回老逻辑，宁可 5 行也不丢字。
+      const trCut = tr ? cutAtWord(tr, Math.max(1, Math.round((tr.length * cut) / wholeLen))).length : 0;
+      const headTr = tr ? tr.slice(0, trCut) : "";
+      const tailTr = tr ? tr.slice(trCut).replace(/^\s+/, "") : "";
+      if (head && tail && (!tr || (headTr && tailTr))) {
+        if (prog < cut) {
+          // 前半页：页内仍逐段揭示；页尾逗号会被转成 …，表示还有后半
+          if (config.revealAsSpoken) {
+            originalEl.textContent = incompleteMark(cutAtWord(head, Math.max(1, prog)));
+            if (tr) {
+              translatedEl.textContent = incompleteMark(
+                sliceByRatio(headTr, Math.min(1, prog / Math.max(1, head.length)))
+              );
+            }
+          } else {
+            originalEl.textContent = head;
+            if (tr) translatedEl.textContent = headTr;
+          }
+        } else {
+          // 后半页：说完才给全文，说到一半只给说到的（尾页内同样不剧透）
+          const local = prog - cut;
+          const done = prog >= wholeLen;
+          if (config.revealAsSpoken) {
+            originalEl.textContent = done ? tail : incompleteMark(cutAtWord(tail, Math.max(1, local)));
+            if (tr) {
+              translatedEl.textContent = done
+                ? tailTr
+                : incompleteMark(sliceByRatio(tailTr, Math.min(1, local / Math.max(1, tail.length))));
+            }
+          } else {
+            originalEl.textContent = tail;
+            if (tr) translatedEl.textContent = tailTr;
+          }
+        }
+      }
     }
   }
 
