@@ -4,7 +4,13 @@
   position: absolute;
   z-index: 60;
   pointer-events: none;
-  /* 放宽到 96%：分句合并后单条字幕会变长，需要更多横向空间排成一行 */
+  /* 关键：按内容取宽，但上限 96%。
+     之前这里没有 width，absolute 元素按 shrink-to-fit 收缩，
+     叠加 .ytbs-line 的 word-break: break-word 会把固有宽度压得很小，
+     结果长英文被挤成又窄又高的 4 行竖块，正好挡住画面中间。
+     改成 max-content 后：短字幕保持紧凑，长句铺满 96% 宽度，
+     同样字数从 4 行变成 1~2 行，贴在底部不挡脸。 */
+  width: max-content;
   max-width: 96%;
 }
 
@@ -74,9 +80,15 @@
 
 .ytbs-line {
   display: block;
+  width: 100%;
   line-height: 1.35;
   white-space: pre-wrap;
-  word-break: break-word;
+  /* 正常按词断行，只在万不得已（超长 URL 这类无空格字符串）时才断词中。
+     之前是 word-break: break-word，它参与固有宽度计算时会把盒子压窄，
+     是「长句变窄竖块」的另一半成因。换成 overflow-wrap 后平时按词断，
+     不影响盒子取宽。 */
+  word-break: normal;
+  overflow-wrap: break-word;
   /* 断行美观：优先 balance（各行长度接近，字幕块更方正），
      不支持的浏览器退回 pretty（避免最后一行只剩一个单词）。
      分句合并后单条字幕常常折 2~3 行，这个差别很明显。 */
