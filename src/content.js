@@ -1137,32 +1137,37 @@
   /**
    * 过滤掉非语音的听觉提示标记。
    *
-   * YouTube 的 ASR 字幕里会夹带这类标签：
-   *   [Music]  [音乐]  [Applause]  [Laughter]  [无声]
-   *   (upbeat music)  (background music)
+   * YouTube 的 ASR 字幕里会夹带这类标签（各语言写法不同，但全在括号里）：
+   *   [Music]  [音乐]  [Musique]  [Música]  [Musik]  【笑声】
+   *   (upbeat music)  (background music)  (sigh)
    * 它们不是台词，翻译出来是「[音乐]」，显示出来纯属噪音。
    * 实测一集视频里能遇到几十处，直接过滤掉。
    *
-   * 只删这些已知的声音/画面提示，不动正常台词里的括号（如 "(pause)"）。
+   * 三层（从严到宽），任何语言通用：
+   *   1. 括号里含声音词 → 删段。多语言词表（英法德西意葡荷中日韩俄阿），
+   *      不用逐个收写法；"(pause)" 这类不在词表里的，混在台词里时保留。
+   *   2. 整条只剩括号段 → 整条是标签，直接丢。未知语言也中，
+   *      如 "[Tepuk tangan]"；台词不可能整条打括号，误伤不了。
+   *   3. 裸写（不带括号）→ 只在整条就是这个词时删，如 "Music"。
+   * 音符 ♪♫ 任何位置都删，它们永远是声音标记。
    */
-  // 用两段拼出来，是因为 "upbeat music" / "background music" 这类
-  // 带形容词的写法，单个 \s* 连不起来。
-  const NON_SPEECH_RE = new RegExp(
-    "[\\[（(]\\s*(?:" +
-      "(?:upbeat|background|soft|loud|tense|up|tempo)?\\s*\\**\\s*music|" +
-      "musical|sound\\s*track|bgm|" +
-      "applause|applauding|clapping|clap|" +
-      "laughter|laughing|laugh|chuckle|" +
-      "cheering|cheer|audience|" +
-      "silence|inaudible|unintelligible|muffled|" +
-      "no\\s*speech|ambient\\s*(?:noise|sound)|crowd\\s*(?:noise|chatter|roar)|" +
-      "gunshot|door\\s*slam|noise|" +
-      "声音|音乐|纯音乐|背景音乐|" +
-      "掌声|掌声雷动|笑声|笑声不断|欢呼|欢呼声|" +
-      "寂静|无声|安静|听不清|模糊不清|噪音|人声嘈杂" +
-    ")\\s*[\\]）)]",
-    "gi"
-  );
+  const NON_SPEECH_WORDS = [
+    "music", "musical", "musique", "musica", "música", "musik", "muziek", "bgm", "soundtrack",
+    "音乐", "纯音乐", "背景音乐", "音楽", "음악", "музыка", "موسيقى",
+    "applause", "applauding", "applaus", "applaudissements", "aplausos", "aplaus", "applausi", "clapping",
+    "掌声", "掌声雷动", "拍手", "박수", "аплодисменты", "تصفيق",
+    "laughter", "laughing", "laugh", "chuckle", "giggle",
+    "rires", "rire", "risas", "risa", "risos", "riso", "risate", "lachen",
+    "笑声", "笑声不断", "笑い", "웃음", "смех", "ضحك",
+    "cheering", "cheer", "crowd", "audience", "欢呼", "欢呼声", "喝彩", "환호",
+    "silence", "silent", "quiet", "inaudible", "unintelligible", "muffled", "no speech",
+    "Stille", "silencio", "silenzio", "无声", "寂静", "安静", "沈黙", "静寂", "침묵", "тишина", "صمت",
+    "gunshot", "explosion", "thunder", "siren", "noise", "枪声", "爆炸", "雷声", "噪音", "выстрел", "взрыв",
+    "sigh", "叹气", "叹息",
+  ];
+  const NON_SPEECH_INNER = new RegExp("(?:" + NON_SPEECH_WORDS.join("|") + ")", "i");
+  const NON_SPEECH_BARE = new RegExp("^(?:" + NON_SPEECH_WORDS.join("|") + ")[.!?…]*$", "i");
+  const NON_SPEECH_BRACKET_SRC = "[[（(【]\\s*[^[\\]（）()【】]{0,60}\\s*[\\]）)】]";
 
   function stripNonSpeech(text) {
     if (!text) return "";
@@ -1172,11 +1177,21 @@
     // 这个标记不是台词，原文会显示成裸的 ">>"，译文里也可能被翻出来。
     // 这里直接去掉（保留它前后的文字）。
     out = out.replace(/\s*>>\s*/g, " ");
-    out = out.replace(NON_SPEECH_RE, "");
-    // 还有一种写法是直接裸写不带括号：Music / Applause / 笑声
-    // 只在整条就是这些词时删，避免误伤正常句子里的 "music"。
-    // 清理过滤后残留的孤立括号，如 "()"、"[]"
-    out = out.replace(/[\[\(（]\s*[\]\)）]/g, "");
+    // 音符纯属声音标记，任何语言、任何位置都删
+    out = out.replace(/[♪♫♩♬]+/g, "");
+    const BR_G = new RegExp(NON_SPEECH_BRACKET_SRC, "g");
+    // 1. 括号里含声音词 → 删段（[Musique]/[音楽]/【笑声】…）
+    out = out.replace(BR_G, (seg) => (NON_SPEECH_INNER.test(seg.slice(1, -1)) ? "" : seg));
+    // 2. 整条只剩括号段 → 整条是标签，直接丢。未知语言也中
+    // （如印尼语 "[Tepuk tangan]"）；台词不可能整条打括号，误伤不了。
+    // 注意 "(pause)" 混在台词里时保留（上面第 1 步没动它），
+    // 只有整条就一个 "(pause)" 时才丢 —— 闪一条"（暂停）"纯属噪音。
+    if (!out.replace(new RegExp(NON_SPEECH_BRACKET_SRC, "g"), "").trim()) return "";
+    // 3. 裸写（不带括号）：只在整条就是这个词时删，避免误伤
+    // 正常句子里的 "music"（如 "I love music" 原样保留）。
+    if (NON_SPEECH_BARE.test(out.trim())) return "";
+    // 清理过滤后残留的孤立括号，如 "()"、"[]"、"【】"
+    out = out.replace(/[[\(（【]\s*[\]\)）】]/g, "");
     // 清理因删除留下的多余空格（连续两个以上）
     out = out.replace(/\s{2,}/g, " ").trim();
     // 清理悬空的标点，如 "，" 开头或 " ，"
