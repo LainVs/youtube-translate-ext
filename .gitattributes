@@ -1,0 +1,4 @@
+# git 会把 .bat 规范化成 LF，但 cmd.exe 只认 CRLF。
+# 不强制的话，Windows 上 clone 下来的脚本会因裸 LF 而报
+# "'Node.js' 不是内部或外部命令" 然后窗口一闪而过。
+*.bat text eol=crlf
