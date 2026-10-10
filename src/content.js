@@ -1427,6 +1427,10 @@
   // CHUNK_AI 与后台 AI_BATCH 对齐：一批 TRANSLATE_BATCH = 一次 spawn，
   // 冷启动成本均摊到 12 条上。
   const CHUNK_AI = 12;
+  // 停顿保留：话音落后、下一句还没来时，把上一句多留这么久。
+  // 没有它每句话音一落屏幕就空，白白一闪；连续说话时 end 压着
+  // 下一条 start，根本走不到保留分支，不影响正常切换。
+  const SUBTITLE_HOLD_MS = 2500;
   // AI 优先覆盖播放点前后这些条，保证眼睛看到的是高质量版。
   const AI_WINDOW = 40;
 
@@ -2115,6 +2119,17 @@
     }
   }
 
+  // 停顿保留：当前时间掉在上一句 end 之后、但还没过保留期，
+  // 且没有新句接上（idx 为 -1）→ 继续显示上一句。
+  // 条件 t >= prev.end 保证 seek 回开头（t < prev.start）不会误留；
+  // 保留期内揭示按满句显示（t 已超 end，showRatio=1，无省略号）。
+  function holdIndex(t, idx) {
+    if (idx >= 0 || lastIndex < 0 || !cueList[lastIndex]) return idx;
+    const prev = cueList[lastIndex];
+    if (t >= prev.end && t - prev.end <= SUBTITLE_HOLD_MS) return lastIndex;
+    return idx;
+  }
+
   function tick() {
     if (!config.enabled) return;
     if (!wrapper || !wrapper.isConnected) {
@@ -2128,7 +2143,7 @@
     const v = mainVideo();
     if (!v) return;
     const t = v.currentTime * 1000;
-    const idx = findCue(t);
+    let idx = holdIndex(t, findCue(t));
 
     // 逐字揭示：同一条字幕内部也要随播放进度刷新，
     // 否则整句会在开口第一帧就全部显示出来（剧透后面还没说到的内容）。
