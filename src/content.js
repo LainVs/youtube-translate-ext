@@ -53,7 +53,11 @@
     trackLang: "",
     mergeBySentence: true,
     mergeMaxChars: 160,
-    mergeMaxGapMs: 1200,
+    // 断句阈值。实测 1200ms 太激进：人说话的自然换气经常超过
+    // 1.2 秒，会把完整的一句从中间切断
+    //（"I think some part of me just knew before" + "I did." 被切成两句）。
+    // 提到 2500，且当上一句还没收尾时会自动放宽到 8.75 秒。
+    mergeMaxGapMs: 2500,
     // 逐字揭示：整句送翻译（保证质量），但只显示"人已经说到"的部分。
     // 关掉就是整句一次性显示。
     revealAsSpoken: true,
@@ -544,6 +548,45 @@
   }
 
   /**
+   * 判断一条字幕是否是「残句」—— 语法上依附前句、不能独立翻译的片段。
+   *
+   * 实测踩到的坑：ASR 把
+   *   "I think some part of me just knew before"  +  "I did."
+   * 切成两条。第一条没有谓语收尾，第二条只有「代词 + 助动词」。
+   * 各自翻译就得到：
+   *   "我想我内心深处早就知道了"  +  "我懂了"
+   * 而原文里的 did 是 know 的省略（"在我知道之前"），
+   * 单独看只能译成「我做了 / 我懂了」，意思完全跑偏。
+   *
+   * 特征：代词/关系词 + 助动词开头，且没有自己的主语。
+   */
+  const FRAGMENT_STARTERS =
+    /^(?:i|you|he|she|it|we|they|who|which|that|there)\s+(?:did|do|does|was|were|am|is|are|had|has|have|can|could|will|would|should|shall|may|might|must|been|being)\b/i;
+
+  // 允许残句以连接词开头（and/but/or/so/because…），
+  // 但要求连接词后面紧跟「代词+助动词」，否则 "That was a great movie."
+  // 这种正常句会被误判。
+  const FRAGMENT_CONNECTED =
+    /^(?:and|but|or|so|because|then|though|although|while|when|if)\s+(?:i|you|he|she|it|we|they)\s+(?:did|do|does|was|were|am|is|are|had|has|have|can|could|will|would|should|shall|may|might|must|been|being)\b/i;
+
+  function isSentenceFragment(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    // 超过 8 个词，多半是真句子而不是残句。
+    // "That was a great movie indeed, honestly."（7 词）必须靠下面的
+    // 更严条件排除，所以这个上限只是第一道粗筛。
+    if (t.split(/\s+/).length > 8) return false;
+    if (FRAGMENT_CONNECTED.test(t)) return true;
+    // 主形态：整条几乎就是「代词 + 助动词 (+ 最多两个修饰词)」。
+    // 用词数严格卡住，避免 "It is what it is, you know." 被误判。
+    const words = t.replace(/[.!?]+$/, "").split(/\s+/).filter(Boolean);
+    if (words.length <= 3 && FRAGMENT_STARTERS.test(t)) return true;
+    // 以逗号/顿号结尾的短插入语
+    if (/[,，、]$/.test(t) && words.length <= 6) return true;
+    return false;
+  }
+
+  /**
    * 判断一条字幕是否构成一个「可独立翻译的句子」。
    *
    * YouTube 的 ASR（自动生成）字幕切得非常碎，实测一条典型长视频的字幕是：
@@ -605,8 +648,26 @@
       } else {
         // 间隔过大（> maxGapMs）视为另一段话，不硬拼
         const gap = c.start - buf.end;
-        const tooFar = gap > maxGapMs;
         const tooLong = (buf.text + " " + piece).length > maxChars;
+
+        // 上一句还没收尾（有句末标点）时，间隔阈值放宽到 4 秒。
+        // 原因：人说话的自然换气经常超过 1.2 秒，原来的 maxGapMs=1200
+        // 太激进，会把一句完整的话从中间切断。
+        const prevOpen = !endsSentence(buf.text);
+        // 上一句还缺收尾时，把「换气停顿」和「真的换话题」区分开：
+        // 人说话中间的换气很少超过 8 秒，超过这个量级基本是另起一段了。
+        const limit = prevOpen ? Math.max(maxGapMs, 8000) : maxGapMs;
+        let tooFar = gap > limit;
+
+        // 「残句」豁免：I did. / and he was. 这类依附前句的片段，
+        // 无论间隔多久、前面有没有收尾，都必须接回上一句，
+        // 否则会被当成独立句子翻译，意思完全跑偏。
+        const frag = isSentenceFragment(piece);
+        // 前一句残缺（没谓语收尾）时更该接回去
+        const prevIncomplete = prevOpen;
+        if (frag && prevIncomplete && !tooLong) {
+          tooFar = false;
+        }
 
         if (tooFar || tooLong) {
           // 先收口已有内容，当前句另起（保持顺序，不丢字）
@@ -627,8 +688,9 @@
         }
       }
 
-      // 拼到句末标点就收口
-      if (buf && endsSentence(buf.text)) flush();
+      // 拼到句末标点就收口；但如果这条本身是残句（I did.），
+      // 它不该结束句子 —— 前一句还等着它补完谓语。
+      if (buf && endsSentence(buf.text) && !isSentenceFragment(piece)) flush();
     }
     flush();
     return out;

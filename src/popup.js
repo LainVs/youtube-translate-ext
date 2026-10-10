@@ -12,7 +12,7 @@ const DEFAULTS = {
   fontFamily: "common",
   mergeBySentence: true,
   mergeMaxChars: 160,
-  mergeMaxGapMs: 1200,
+  mergeMaxGapMs: 2500,
   revealAsSpoken: true,
   domKeepLatest: true,
   originalColor: "#39ff6a",
