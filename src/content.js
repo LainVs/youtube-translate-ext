@@ -140,14 +140,37 @@
         return;
       }
       if (msg.type === "GET_STATUS") {
-        sendResponse({
-          loaded: cueList.length,
-          translated: countTranslated(),
-          videoId: currentVideoId,
-          source: lastSource,
-          error: lastError,
-          trackLang: config.trackLang || "",
-        });
+        // 诊断不仅要「翻了多少」，更要「为什么画面没字」：
+        // 把渲染链路的关键状态一次返回，弹窗里一眼定位。
+        let diag = {};
+        try {
+          const t = nowMs();
+          diag = {
+            videoTimeMs: t,
+            cueIdx: findCue(t),
+            enabled: !!config.enabled,
+            domMode: !!domMode,
+            isAdPlaying: !!isAdPlaying,
+            boxVisible:
+              !!box &&
+              box.style.display !== "none" &&
+              box.style.visibility !== "hidden",
+            overlayInDom: !!(wrapper && wrapper.isConnected),
+          };
+        } catch (e) {
+          /* ignore */
+        }
+        sendResponse(Object.assign(
+          {
+            loaded: cueList.length,
+            translated: countTranslated(),
+            videoId: currentVideoId,
+            source: lastSource,
+            error: lastError,
+            trackLang: config.trackLang || "",
+          },
+          diag
+        ));
         return;
       }
     });
@@ -1648,8 +1671,19 @@
   // 而是用 MutationObserver 直接读播放器已经画出来的原生字幕，读到一行翻一行。
   // 好处是完全不受 PoToken 风控影响；代价是必须开着原生 CC，且没有全片时间轴（导出会只有已看到的部分）。
 
+  // 取主播放器的 video。不能直接 querySelector("video")：
+  // 开小窗播放（miniplayer）时页面里会有两个 video，
+  // 拿错的话 currentTime 对不上字幕时间轴，字幕永远对不上。
+  function mainVideo() {
+    return (
+      document.querySelector("#movie_player video") ||
+      document.querySelector(".html5-video-player video") ||
+      document.querySelector("video")
+    );
+  }
+
   function nowMs() {
-    const v = document.querySelector("video");
+    const v = mainVideo();
     return v ? Math.round(v.currentTime * 1000) : Date.now();
   }
 
@@ -1842,7 +1876,7 @@
     // DOM 实时模式由 MutationObserver 驱动渲染，不走二分时间轴
     if (domMode) return;
 
-    const v = document.querySelector("video");
+    const v = mainVideo();
     if (!v) return;
     const t = v.currentTime * 1000;
     const idx = findCue(t);
@@ -1960,6 +1994,31 @@
   }
 
   // ============================== 广告检测 ==============================
+  //
+  // 之前这里有个致命误判：
+  //   ad = !!document.querySelector(".ytp-ad-player-overlay, .ytp-ad-skip-button");
+  // YouTube 会把广告遮罩层常驻在 DOM 里（只是平时隐藏），
+  // 「元素存在」≠「正在放广告」。一旦误判，isAdPlaying 锁死为 true，
+  // tick() 永久提前返回，字幕层 display:none ——
+  // 现象就是「翻译在跑，前面几句都翻好了，画面就是没字幕」。
+  // 所以：只认播放器的 ad-showing / ad-interrupting 类；
+  // 遮罩层必须「实际可见」（有布局盒）才算数。
+  function isAdOverlayVisible() {
+    try {
+      const els = document.querySelectorAll(".ytp-ad-player-overlay, .ytp-ad-skip-button");
+      for (const el of els) {
+        if (!(el instanceof HTMLElement)) continue;
+        // display:none / 未布局的元素 offsetParent 为 null（fixed 定位除外，
+        // 广告遮罩不是 fixed，这里够用）；再加一层尺寸检查。
+        const r = el.getBoundingClientRect();
+        if (el.offsetParent !== null && r.width > 0 && r.height > 0) return true;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return false;
+  }
+
   function startAdDetection() {
     adTimer = setInterval(() => {
       const player = document.querySelector("#movie_player");
@@ -1970,7 +2029,7 @@
           player.classList.contains("ad-interrupting");
       }
       if (!ad) {
-        ad = !!document.querySelector(".ytp-ad-player-overlay, .ytp-ad-skip-button");
+        ad = isAdOverlayVisible();
       }
       if (ad && !isAdPlaying) {
         isAdPlaying = true;

@@ -370,8 +370,17 @@ function bindEvents() {
         if (res) {
           let msg = "已加载 " + res.loaded + " 条 / 已翻译 " + res.translated + " 条";
           if (res.source) msg += "（来源 " + res.source + "）";
+          if (typeof res.videoTimeMs === "number" && res.loaded) {
+            msg += " / 播放 " + Math.round(res.videoTimeMs / 1000) + "s";
+            msg += res.cueIdx >= 0 ? " 当前第 " + (res.cueIdx + 1) + " 条" : " 当前无字幕（间奏或空档）";
+          }
+          if (res.enabled === false) msg += " 【扩展被关掉】";
+          if (res.isAdPlaying) msg += " 【检测到广告，字幕暂停】";
+          if (res.boxVisible === false) msg += " 【字幕层被隐藏】";
+          if (res.overlayInDom === false) msg += " 【覆盖层不在页面】";
+          if (res.domMode) msg += "（实时模式）";
           if (res.error) msg += " 错误：" + res.error;
-          showStatusMsg(msg, !!res.error || res.loaded === 0);
+          showStatusMsg(msg, !!res.error || res.loaded === 0 || res.boxVisible === false);
         } else showStatusMsg("无返回", true);
       });
     });
