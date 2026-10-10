@@ -40,7 +40,7 @@
   background: rgba(0, 0, 0, 0.6);
   color: #fff;
   font-size: 13px;
-  cursor: move;
+  cursor: ns-resize;
   pointer-events: auto;
   opacity: 0;
   transition: opacity 0.15s ease;

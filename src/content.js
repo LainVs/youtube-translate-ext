@@ -1848,7 +1848,7 @@
     const handle = document.createElement("div");
     handle.id = "ytbs-handle";
     handle.textContent = "⠿";
-    handle.title = "拖动调整位置";
+    handle.title = "上下拖动调整位置";
 
     const downloadBtn = document.createElement("div");
     downloadBtn.id = "ytbs-download";
@@ -1884,16 +1884,18 @@
     applyPosition();
   }
 
+  // 定位：只允许上下拖，横向永远居中。
+  // 之前是自由拖拽，横向一动中线就歪，放回去全凭手感（反人类）；
+  // 而真实需求只有"避开底部烧录字幕/挡脸"，上下足够。
+  // 存量 position.left 直接忽略，老用户横移过的会自动回中线，只保留高度。
   function applyPosition() {
     if (!wrapper) return;
-    if (position && typeof position.left === "number" && typeof position.bottom === "number") {
-      wrapper.style.left = position.left + "px";
+    wrapper.style.left = "50%";
+    wrapper.style.transform = "translateX(-50%)";
+    if (position && typeof position.bottom === "number") {
       wrapper.style.bottom = position.bottom + "px";
-      wrapper.style.transform = "none";
     } else {
-      wrapper.style.left = "50%";
       wrapper.style.bottom = "80px";
-      wrapper.style.transform = "translateX(-50%)";
     }
   }
 
@@ -2534,11 +2536,11 @@
     playerEl.addEventListener("mouseleave", hideControls);
   }
 
+  // 拖动：只上下，不左右。横向永远居中（见 applyPosition），
+  // 抓起来往哪边歪都不可能，松手即正。
   function enableDrag(handle) {
     let dragging = false;
-    let startX = 0;
     let startY = 0;
-    let startLeft = 0;
     let startBottom = 0;
 
     handle.addEventListener("mousedown", (e) => {
@@ -2548,9 +2550,7 @@
       showControls(); // 按住拖动时保持可见（否则 2 秒藏了抓瞎）
       const rect = wrapper.getBoundingClientRect();
       const parentRect = playerEl.getBoundingClientRect();
-      startX = e.clientX;
       startY = e.clientY;
-      startLeft = rect.left - parentRect.left;
       startBottom = parentRect.bottom - rect.bottom;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
@@ -2560,12 +2560,10 @@
       if (!dragging) return;
       const parentRect = playerEl.getBoundingClientRect();
       const boxRect = box.getBoundingClientRect();
-      let left = startLeft + (e.clientX - startX);
       let bottom = startBottom - (e.clientY - startY);
-      left = Math.max(0, Math.min(left, parentRect.width - boxRect.width));
       bottom = Math.max(0, Math.min(bottom, parentRect.height - boxRect.height));
-      wrapper.style.transform = "none";
-      wrapper.style.left = left + "px";
+      wrapper.style.left = "50%";
+      wrapper.style.transform = "translateX(-50%)";
       wrapper.style.bottom = bottom + "px";
     }
 
@@ -2576,7 +2574,6 @@
       document.removeEventListener("mouseup", onUp);
       showControls(); // 松手后重新起 2 秒倒计时藏
       position = {
-        left: parseFloat(wrapper.style.left) || 0,
         bottom: parseFloat(wrapper.style.bottom) || 80,
       };
       try {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube 双语字幕翻译",
-  "version": "0.7.16",
+  "version": "0.7.17",
   "description": "在 YouTube 上显示原文 + 译文双语字幕，支持原文/译文各自自定义字体颜色与字号。",
   "permissions": ["storage", "unlimitedStorage"],
   "host_permissions": [
