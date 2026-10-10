@@ -27,88 +27,13 @@ const DEFAULTS = {
   boxRadius: 0,
   boxPadding: 0,
   outline: 2,
-  stylePreset: "neon",
   exportFormat: "srt",
   exportMode: "bilingual",
   trackLang: "",
 };
 
-/**
- * 风格预设：一键套用配色和背景。
- *
- * ⚠️刻意不包含 originalSize / translatedSize / fontScale / fontFamily。
- * 字号和字体是用户自己的偏好，预设一旦覆盖就会被「锁死」——
- * 之前版本就是因为预设里带了字号，导致点了预设后字号改不动。
- * 所以预设只管「长什么样」，不管「多大、用什么字」。
- */
-const PRESETS = {
-  neon: {
-    // 霓虹：亮绿+亮黄，透明底+强描边，任何画面都跳出来
-    originalColor: "#39ff6a",
-    translatedColor: "#ffe14d",
-    bgColor: "#000000",
-    bgOpacity: 0,
-    boxRadius: 0,
-    boxPadding: 0,
-    outline: 2,
-  },
-  cinema: {
-    // 影院：白字+青色，圆角黑底，对比最强
-    originalColor: "#ffffff",
-    translatedColor: "#7fe3ff",
-    bgColor: "#000000",
-    bgOpacity: 62,
-    boxRadius: 10,
-    boxPadding: 10,
-    outline: 0,
-  },
-  paper: {
-    // 纸感：米白底+墨色字+砖红译文，浅色/雪景画面友好
-    originalColor: "#1a1a1a",
-    translatedColor: "#c1440e",
-    bgColor: "#f5f0e6",
-    bgOpacity: 82,
-    boxRadius: 6,
-    boxPadding: 8,
-    outline: 0,
-  },
-  amber: {
-    // 琥珀：暖色系，久看不刺眼
-    originalColor: "#fff4d6",
-    translatedColor: "#ffa62b",
-    bgColor: "#2a1c0e",
-    bgOpacity: 55,
-    boxRadius: 12,
-    boxPadding: 10,
-    outline: 1,
-  },
-  ocean: {
-    // 深海：白字+天蓝，沉稳
-    originalColor: "#ffffff",
-    translatedColor: "#6ec6ff",
-    bgColor: "#0a1a2f",
-    bgOpacity: 58,
-    boxRadius: 10,
-    boxPadding: 10,
-    outline: 0,
-  },
-  noir: {
-    // 极简：纯黑白，靠字号和粗细区分两行
-    originalColor: "#f2f2f2",
-    translatedColor: "#ffffff",
-    bgColor: "#000000",
-    bgOpacity: 78,
-    boxRadius: 4,
-    boxPadding: 8,
-    outline: 0,
-  },
-};
-
-/** 预设只覆盖这些键——注意不含任何字号/字体键 */
-const PRESET_KEYS = Object.keys(PRESETS.neon);
-
-/** 手动微调后需要取消预设高亮的键 */
-const STYLE_KEYS = PRESET_KEYS.concat(["outline"]);
+/** 手动输入模型 ID 时下拉框用的特殊值 */
+const AI_MODEL_CUSTOM = "custom";
 
 const TARGET_LANGS = [
   ["zh-CN", "简体中文"],
@@ -152,9 +77,15 @@ async function init() {
     else el.value = stored[key];
   });
 
+  // 存过的模型不在下拉里（历史手输值）→ 落到 custom 并回填
+  if (!modelOptionExists(stored.aiModel)) {
+    $("aiModel").value = AI_MODEL_CUSTOM;
+    $("aiModelCustom").value = stored.aiModel || "";
+  }
+  updateModelCustomVisibility();
+
   updateAiBox();
   updateLabels();
-  markPreset(stored.stylePreset);
   bindEvents();
 }
 
@@ -232,25 +163,26 @@ function updateLabels() {
   $("boxPaddingVal").textContent = $("boxPadding").value;
 }
 
-/** 把预设写进控件 + 标高亮当前预设 */
-function markPreset(name) {
-  document.querySelectorAll("#presets .preset").forEach((b) => {
-    b.classList.toggle("active", b.dataset.preset === name);
-  });
+/** 下拉框里有没有这个模型 ID（没有就是历史遗留的手输值，走 custom） */
+function modelOptionExists(value) {
+  const sel = $("aiModel");
+  for (const opt of sel.options) {
+    if (opt.value === value) return true;
+  }
+  return false;
 }
 
-/** 一键套用预设：写控件 → 存盘 → 立刻预览高亮。不会碰字号和字体。 */
-async function applyPreset(name) {
-  const p = PRESETS[name];
-  if (!p) return;
-  PRESET_KEYS.forEach((k) => {
-    const el = $(k);
-    if (el) el.value = p[k];
-  });
-  $("outline").value = String(p.outline);
-  updateLabels();
-  markPreset(name);
-  await save(Object.assign({ stylePreset: name }, p));
+/** 当前生效的模型 ID：custom 时读手输框 */
+function getAiModel() {
+  if ($("aiModel").value === AI_MODEL_CUSTOM) {
+    return $("aiModelCustom").value.trim() || DEFAULTS.aiModel;
+  }
+  return $("aiModel").value;
+}
+
+function updateModelCustomVisibility() {
+  const custom = $("aiModel").value === AI_MODEL_CUSTOM;
+  $("aiModelCustomWrap").style.display = custom ? "" : "none";
 }
 
 function bindEvents() {
@@ -278,15 +210,27 @@ function bindEvents() {
     $(id).addEventListener("change", () => {
       const el = $(id);
       const value = el.type === "checkbox" ? el.checked : el.value;
-      // 手动改样式就不再高亮预设（提示「你已经在预设之外微调了」）
-      if (id !== "fontFamily" && STYLE_KEYS.includes(id)) markPreset(null);
       save({ [id]: value });
       if (id === "translator") updateAiBox();
     });
   });
 
-  // 数字输入（AI 三件套）
-  ["aiBaseUrl", "aiApiKey", "aiModel"].forEach((id) => {
+  // 模型下拉：custom 时显示手输框，存手输值；否则存选项值
+  $("aiModel").addEventListener("change", () => {
+    updateModelCustomVisibility();
+    if ($("aiModel").value !== AI_MODEL_CUSTOM) {
+      save({ aiModel: $("aiModel").value });
+    } else if ($("aiModelCustom").value.trim()) {
+      save({ aiModel: $("aiModelCustom").value.trim() });
+    }
+  });
+  $("aiModelCustom").addEventListener("input", () => {
+    const v = $("aiModelCustom").value.trim();
+    if (v) save({ aiModel: v });
+  });
+
+  // 文本输入（AI 地址三件套里的前两个）
+  ["aiBaseUrl", "aiApiKey"].forEach((id) => {
     $(id).addEventListener("input", () => save({ [id]: $(id).value }));
   });
 
@@ -294,14 +238,8 @@ function bindEvents() {
   ["originalSize", "translatedSize", "fontScale", "bgOpacity", "boxRadius", "boxPadding"].forEach((id) => {
     $(id).addEventListener("input", () => {
       updateLabels();
-      // 字号是用户自己的偏好，改它不应该取消预设高亮
       save({ [id]: Number($(id).value) });
     });
-  });
-
-  // 风格预设：一键套用
-  document.querySelectorAll("#presets .preset").forEach((btn) => {
-    btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
   });
 
   // 导出
@@ -341,7 +279,7 @@ function bindEvents() {
       targetLang: $("targetLang").value,
       aiBaseUrl: $("aiBaseUrl").value,
       aiApiKey: $("aiApiKey").value,
-      aiModel: $("aiModel").value,
+      aiModel: getAiModel(),
     };
     showTestMsg("测试中…");
     chrome.runtime.sendMessage(
@@ -393,6 +331,8 @@ function bindEvents() {
       if (el.type === "checkbox") el.checked = DEFAULTS[key];
       else el.value = DEFAULTS[key];
     });
+    $("aiModelCustom").value = "";
+    updateModelCustomVisibility();
     updateAiBox();
     updateLabels();
     save(Object.assign({}, DEFAULTS));

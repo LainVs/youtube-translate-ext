@@ -9,7 +9,7 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.7.7</span>
+      <span class="ver">v0.7.8</span>
     </header>
 
     <div id="fatal" class="fatal" style="display: none"></div>
@@ -77,46 +77,26 @@
           <input type="password" id="aiApiKey" placeholder="留空即可（桥不校验）" />
         </label>
         <label class="col">
-          <span>模型</span>
-          <input type="text" id="aiModel" placeholder="opencode/big-pickle" />
+          <span>模型（opencode 免费）</span>
+          <select id="aiModel">
+            <option value="opencode/big-pickle">opencode/big-pickle（默认，实测可用）</option>
+            <option value="opencode/exo-free">opencode/exo-free</option>
+            <option value="opencode/ling-3.0-flash-fin-free">opencode/ling-3.0-flash-fin-free</option>
+            <option value="opencode/ling-3.1-flash-free">opencode/ling-3.1-flash-free</option>
+            <option value="opencode/longcat-2.5-preview-free">opencode/longcat-2.5-preview-free</option>
+            <option value="opencode/mimo-v2.6-flash-free">opencode/mimo-v2.6-flash-free</option>
+            <option value="opencode/muse-spark-1.3-contributor-free">opencode/muse-spark-1.3-contributor-free</option>
+            <option value="opencode/nemotron-3-ultra-free">opencode/nemotron-3-ultra-free</option>
+            <option value="opencode/nemotron-3.5-lightning-free">opencode/nemotron-3.5-lightning-free</option>
+            <option value="opencode/space-bunny-free">opencode/space-bunny-free</option>
+            <option value="opencode/step-5-preview-free">opencode/step-5-preview-free</option>
+            <option value="custom">手动输入…</option>
+          </select>
         </label>
-      </div>
-    </section>
-
-    <section>
-      <div class="title">风格预设<span class="hint">只改配色和背景，不动你的字号</span></div>
-
-      <div class="presets" id="presets">
-        <button class="preset" data-preset="neon">
-          <span class="pv pv-neon"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">霓虹</span>
-          <span class="pd">亮绿+亮黄，透明底强描边</span>
-        </button>
-        <button class="preset" data-preset="cinema">
-          <span class="pv pv-cinema"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">影院</span>
-          <span class="pd">白字+青色，圆角黑底</span>
-        </button>
-        <button class="preset" data-preset="paper">
-          <span class="pv pv-paper"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">纸感</span>
-          <span class="pd">浅色底，亮画面友好</span>
-        </button>
-        <button class="preset" data-preset="amber">
-          <span class="pv pv-amber"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">琥珀</span>
-          <span class="pd">米白+琥珀，暖色不刺眼</span>
-        </button>
-        <button class="preset" data-preset="ocean">
-          <span class="pv pv-ocean"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">深海</span>
-          <span class="pd">白字+天蓝，藏青底</span>
-        </button>
-        <button class="preset" data-preset="noir">
-          <span class="pv pv-noir"><i class="o">English text</i><i class="t">中文字幕</i></span>
-          <span class="pn">极简</span>
-          <span class="pd">纯黑白，靠字号区分两行</span>
-        </button>
+        <label class="col" id="aiModelCustomWrap" style="display: none">
+          <span>自定义模型 ID</span>
+          <input type="text" id="aiModelCustom" placeholder="provider/model-id" />
+        </label>
       </div>
     </section>
 

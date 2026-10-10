@@ -44,8 +44,6 @@
     boxPadding: 0,
     // 文字描边强度：0 无 / 1 柔和阴影 / 2 强描边（无底色时靠它保证可读）
     outline: 2,
-    // 当前套用的风格预设（仅用于面板高亮）
-    stylePreset: "neon",
     // 导出
     exportFormat: "srt", // srt | vtt | txt
     exportMode: "bilingual", // bilingual | translation | original
