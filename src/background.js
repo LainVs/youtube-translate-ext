@@ -155,8 +155,12 @@ async function translateGoogle(texts, targetLang) {
     }
   }
 
-  // 逐条翻译（有限并发）
-  return await mapLimit(texts, 4, (t) => safeOne(t, targetLang));
+  // 逐条翻译（有限并发；每条之间停 400ms，别触发 Google 的突发限流）
+  return await mapLimit(texts, 4, async (t) => {
+    const r = await safeOne(t, targetLang);
+    await sleep(400);
+    return r;
+  });
 }
 
 async function safeOne(text, targetLang) {
@@ -206,18 +210,31 @@ async function aiOnce(texts, cfg, targetLang, langName) {
   const headers = { "Content-Type": "application/json" };
   if (cfg.aiApiKey) headers["Authorization"] = "Bearer " + cfg.aiApiKey;
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: cfg.aiModel || "gpt-4o-mini",
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(texts) },
-      ],
-    }),
-  });
+  // AI_TIMEOUT_MS 之前只定义没用过：fetch 一旦 hang 住，
+  // 整个 TRANSLATE_BATCH 永远不返回，后面的句子连试的机会都没有。
+  // 用 AbortController 强制超时，失败交给外层的逐条重试。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS);
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: cfg.aiModel || "gpt-4o-mini",
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(texts) },
+        ],
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    throw new Error("AI 翻译超时或网络失败: " + ((e && e.message) || e));
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -293,8 +310,13 @@ async function translateAI(texts, cfg) {
           } catch (e2) {
             results[offset + j] = slice[j];
           }
+          // 别把免费层打爆：上一轮失败很可能就是被限流，
+          // 无间隔地连发只会让后面也一起挂（前半正常、后半全英文就是这么来的）
+          await sleep(1000);
         }
       }
+      // 批之间也喘一口气，给免费层恢复配额的时间
+      await sleep(1500);
     }
   }
   const n = Math.min(AI_CONCURRENCY, batches.length);
@@ -303,6 +325,10 @@ async function translateAI(texts, cfg) {
 }
 
 /* ================================== 工具 =================================== */
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 async function mapLimit(items, limit, fn) {
   const results = new Array(items.length);

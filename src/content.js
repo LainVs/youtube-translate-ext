@@ -84,6 +84,11 @@
 
   let cueList = [];               // [{ start, end, dur, text }]
   const translationCache = new Map(); // cacheKey -> 译文
+  // 翻译失败计数：cacheKey -> 连续失败次数。失败**不进缓存**（否则
+  // 「133/133 已翻译」全是假数），由 ensureTranslations 补翻；
+  // 超过上限才放弃，避免对永久失败的句子无限重试。
+  const failedAttempts = new Map();
+  const MAX_RETRANSLATE = 3;
 
   let wrapper = null;             // 全尺寸定位层
   let box = null;                 // 字幕框
@@ -230,6 +235,7 @@
 
         if (needRetranslate) {
           translationCache.clear();
+          failedAttempts.clear();
         }
 
         if (!wasEnabled && config.enabled) {
@@ -293,6 +299,7 @@
     cleanupUI();
     cueList = [];
     translationCache.clear();
+    failedAttempts.clear();
     lastIndex = -1;
 
     if (!config.enabled) return;
@@ -1242,6 +1249,26 @@
     return config.translator + "|" + config.targetLang + "|" + text;
   }
 
+  /**
+   * 判断一条「译文」是不是失败回退的假货。
+   *
+   * 两条回退路径都会把原文原样塞回来：
+   *   - background 的 aiOnce：数量对不上时按位置补原文
+   *   - background 的 translateAI / safeOne：catch 里直接返回原文
+   * 旧逻辑 runChunk 照单全收，于是译文行显示英文，
+   * 计数还显示 133/133，失败被永久掩盖。
+   *
+   * 判据：译文与原文完全相同（去首尾空白后）。
+   * 例外：目标语言就是英文时相同是合理的（英翻英），不判失败，
+   * 否则英→英用户会陷入无限重试。
+   */
+  function isPoisonedTranslation(src, tr) {
+    if (typeof tr !== "string" || !tr.trim()) return true;
+    if (tr.trim() !== String(src).trim()) return false;
+    const base = String(config.targetLang || "").split("-")[0].toLowerCase();
+    return base !== "en";
+  }
+
   // ---- 持久化缓存（存 chrome.storage.local，按视频 + 引擎 + 目标语言隔离）----
   function persistentKey(videoId) {
     return CACHE_PREFIX + videoId;
@@ -1261,6 +1288,14 @@
           ) {
             let n = 0;
             for (const text in entry.map) {
+              const tr = entry.map[text];
+              // 旧版本把失败回退的原文也存进去了（译文 === 原文），
+              // 下次加载必须跳过，否则那一两句永远是英文且永不重翻。
+              // 例外：目标就是英文时相同是合理的。
+              const base = String(entry.lang || "").split("-")[0].toLowerCase();
+              if (base !== "en" && typeof tr === "string" && tr.trim() === String(text).trim()) {
+                continue;
+              }
               if (!translationCache.has(cacheKey(text))) {
                 translationCache.set(cacheKey(text), entry.map[text]);
                 n++;
@@ -1311,7 +1346,8 @@
     }
   }
 
-  async function ensureTranslations() {
+  async function ensureTranslations(depth) {
+    depth = depth || 0;
     if (!cueList.length || !config.enabled) return;
     const token = loadToken;
 
@@ -1324,8 +1360,24 @@
       }
     }
 
-    const pending = texts.filter((t) => !translationCache.has(cacheKey(t)));
-    if (!pending.length) return;
+    // 失败的不进缓存，所以这里能看到它们；超过上限的才放弃。
+    let pending = texts.filter(
+      (t) => !translationCache.has(cacheKey(t)) && (failedAttempts.get(cacheKey(t)) || 0) < MAX_RETRANSLATE
+    );
+    if (!pending.length) {
+      renderCue(lastIndex, true);
+      return;
+    }
+
+    // 优先翻当前正在看的句子：轮转到当前句开头，
+    // 否则用户盯着的那句恰好排在队尾，要等前面全翻完。
+    if (lastIndex >= 0 && cueList[lastIndex]) {
+      const cur = cueList[lastIndex].text;
+      const at = pending.indexOf(cur);
+      if (at > 0) {
+        pending = pending.slice(at).concat(pending.slice(0, at));
+      }
+    }
 
     if (statusEl) {
       statusEl.textContent = "翻译中… 0/" + pending.length;
@@ -1345,13 +1397,27 @@
     }
 
     if (statusEl) {
-      statusEl.textContent = "已翻译 " + done + " 条";
+      const missing = pending.filter((t) => !translationCache.has(cacheKey(t))).length;
+      statusEl.textContent = missing
+        ? "已翻译 " + (pending.length - missing) + "/" + pending.length + " 条，" + missing + " 条稍后补翻"
+        : "已翻译 " + done + " 条";
       setTimeout(() => {
         if (statusEl) statusEl.style.display = "none";
       }, 1500);
     }
     renderCue(lastIndex, true);
     savePersistentNow();
+
+    // 补翻：偶发失败（模型超时、返回错位）等几秒再试，最多两轮。
+    // 之前是一锤子买卖，失败的那一两句永久是英文。
+    const still = pending.filter(
+      (t) => !translationCache.has(cacheKey(t)) && (failedAttempts.get(cacheKey(t)) || 0) < MAX_RETRANSLATE
+    );
+    if (still.length && depth < 2 && token === loadToken && config.enabled) {
+      await sleep(8000);
+      if (token !== loadToken || !config.enabled) return;
+      await ensureTranslations(depth + 1);
+    }
   }
 
   /** 翻译一批文本（预取模式与 DOM 实时模式共用） */
@@ -1372,7 +1438,15 @@
     if (res && Array.isArray(res.translations)) {
       for (let j = 0; j < chunk.length; j++) {
         const tr = res.translations[j];
-        if (typeof tr === "string" && tr) translationCache.set(cacheKey(chunk[j]), tr);
+        const key = cacheKey(chunk[j]);
+        // 失败回退的原文不进缓存，进了就是永久英文 + 假计数。
+        // 记一次失败，ensureTranslations 会补翻。
+        if (!isPoisonedTranslation(chunk[j], tr)) {
+          translationCache.set(key, tr);
+          failedAttempts.delete(key);
+        } else {
+          failedAttempts.set(key, (failedAttempts.get(key) || 0) + 1);
+        }
       }
     } else if (res && res.error) {
       LOG("翻译错误:", res.error);
@@ -2210,6 +2284,7 @@
     cleanupUI();
     cueList = [];
     translationCache.clear();
+    failedAttempts.clear();
     lastIndex = -1;
     currentVideoId = null;
   }
