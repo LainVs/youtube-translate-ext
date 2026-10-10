@@ -51,12 +51,12 @@
   opacity: 1;
 }
 
-/* 拖动把手平时透明、悬停才显示，但字幕层是 pointer-events: none，
-   鼠标事件直接穿透，wrapper:hover 永远触发不了 → 把手永久隐身，
-   用户根本找不到它（这就是"不能拖"的真正原因）。
-   改成播放器悬停就显示：鼠标进画面底部区域就能看到把手。 */
-#movie_player:hover #ytbs-handle,
-.html5-video-player:hover #ytbs-handle {
+/* 把手/导出按钮：平时透明，JS 在鼠标靠近字幕 60px 内时挂
+   .ytbs-show-controls 才显示，2 秒不动自动藏。
+   CSS :hover 做不到——字幕层 pointer-events:none，hover 落不到它身上；
+   之前 movie_player:hover 的写法是鼠标在视频任何位置都显示，太扰民。 */
+#ytbs-wrapper.ytbs-show-controls #ytbs-handle,
+#ytbs-wrapper.ytbs-show-controls #ytbs-download {
   opacity: 1;
 }
 

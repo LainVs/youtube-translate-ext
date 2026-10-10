@@ -677,13 +677,15 @@
    *   2. 连词前必须有逗号/分号/冒号 —— "Tom and Jerry" 这种无标点的
    *      并列结构碰都不碰；
    *   3. 逗号前必须是字母或右引号/右括号 —— "1,000" 这种数字逗号不算；
-   *   4. 前后半都有最小长度 —— 拒绝碎片页。
+   *   4. 前后半都有最小长度 —— 拒绝碎片页（前半 30 字约一行，
+   *      实测 "Nobody taught the bacteria to resist," 37 字就卡在旧 40 线上，
+   *      整句 137 字硬是没分页，5 行怼脸）。
    * 多个候选取最接近中间的，前后页行数最均衡。
    *
    * @returns {number} 断点下标（逗号之后，含逗号归前半）；没有返回 -1
    */
   const CLAUSE_MIN_LEN = 100;
-  const CLAUSE_MIN_HEAD = 40;
+  const CLAUSE_MIN_HEAD = 30;
   const CLAUSE_MIN_TAIL = 25;
   const CLAUSE_CONJ = /^(?:and|but|or|nor|so|yet)$/i;
 
@@ -1878,6 +1880,7 @@
     playerEl.appendChild(wrapper);
 
     enableDrag(handle);
+    enableControlsHover();
     applyPosition();
   }
 
@@ -2494,6 +2497,43 @@
   }
 
   // ============================== 拖拽 ==============================
+  // 悬停显隐：把手/导出按钮平时透明，鼠标靠近字幕才出现，2 秒不动自动藏。
+  // CSS :hover 做不到：字幕层 pointer-events:none，hover 事件落不到它身上；
+  // 之前 #movie_player:hover 的写法是"鼠标在视频任何位置都显示"，太扰民。
+  let controlsTimer = null;
+
+  function showControls() {
+    if (wrapper) wrapper.classList.add("ytbs-show-controls");
+    clearTimeout(controlsTimer);
+    controlsTimer = setTimeout(hideControls, 2000);
+  }
+
+  function hideControls() {
+    clearTimeout(controlsTimer);
+    controlsTimer = null;
+    if (wrapper) wrapper.classList.remove("ytbs-show-controls");
+  }
+
+  // 鼠标在字幕盒 60px 内才亮把手，离远（或 2 秒不动）自动藏
+  function onPlayerMouseMove(e) {
+    if (!box || !box.isConnected) return;
+    const r = box.getBoundingClientRect();
+    const PAD = 60;
+    if (
+      e.clientX >= r.left - PAD && e.clientX <= r.right + PAD &&
+      e.clientY >= r.top - PAD && e.clientY <= r.bottom + PAD
+    ) {
+      showControls();
+    }
+  }
+
+  function enableControlsHover() {
+    if (!playerEl || playerEl.__ytbsHover) return;
+    playerEl.__ytbsHover = true; // 播放器元素跨视频复用，防重复绑定
+    playerEl.addEventListener("mousemove", onPlayerMouseMove, { passive: true });
+    playerEl.addEventListener("mouseleave", hideControls);
+  }
+
   function enableDrag(handle) {
     let dragging = false;
     let startX = 0;
@@ -2505,6 +2545,7 @@
       e.preventDefault();
       e.stopPropagation();
       dragging = true;
+      showControls(); // 按住拖动时保持可见（否则 2 秒藏了抓瞎）
       const rect = wrapper.getBoundingClientRect();
       const parentRect = playerEl.getBoundingClientRect();
       startX = e.clientX;
@@ -2533,6 +2574,7 @@
       dragging = false;
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      showControls(); // 松手后重新起 2 秒倒计时藏
       position = {
         left: parseFloat(wrapper.style.left) || 0,
         bottom: parseFloat(wrapper.style.bottom) || 80,
@@ -2650,6 +2692,8 @@
   function cleanupUI() {
     stopSync();
     stopDomMode();
+    clearTimeout(controlsTimer);
+    controlsTimer = null;
     if (wrapper && wrapper.isConnected) wrapper.remove();
     wrapper = null;
     box = null;
