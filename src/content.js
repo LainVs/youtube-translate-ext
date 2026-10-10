@@ -661,7 +661,7 @@
   }
 
   /**
-   * 从句分页断点：超长单句在「逗号/分号/冒号 + 并列连词」处分页显示。
+   * 从句分页断点：超长单句在从句边界处分页显示。
    *
    * 背景：splitAll 只认句末标点（.!?），"…eight years old, and nobody…"
    * 这种 140 字整句没有任何句末标点，会原样留到显示层，变成英 3 行 +
@@ -674,8 +674,10 @@
    *
    * 安全绳（缺一不可）：
    *   1. 整句超长才分（CLAUSE_MIN_LEN），短句原样；
-   *   2. 连词前必须有逗号/分号/冒号 —— "Tom and Jerry" 这种无标点的
-   *      并列结构碰都不碰；
+   *   2. 并列连词（and/or/et/ou…）前必须有逗号/分号/冒号 ——
+   *      "Tom and Jerry"、"thé ou café" 这种无标点的并列碰都不碰；
+   *      从属连词（because/even if/parce que…）本身就是从句标记，
+   *      有没有逗号都断；but 裸奔排除 "all but"，so 裸奔要求后跟代词；
    *   3. 逗号前必须是字母或右引号/右括号 —— "1,000" 这种数字逗号不算；
    *   4. 前后半都有最小长度 —— 拒绝碎片页（前半 30 字约一行，
    *      实测 "Nobody taught the bacteria to resist," 37 字就卡在旧 40 线上，
@@ -687,22 +689,55 @@
   const CLAUSE_MIN_LEN = 100;
   const CLAUSE_MIN_HEAD = 30;
   const CLAUSE_MIN_TAIL = 25;
-  const CLAUSE_CONJ = /^(?:and|but|or|nor|so|yet)$/i;
+  // 两类连词：
+  //   并列连词（and/but/or/nor/so/yet + 法语 et/mais/donc/car/ou/ni）
+  //     必须有逗号/分号/冒号 —— "Tom and Jerry" 无逗号不碰。
+  //   从属连词（because/even if/as if + 法语 parce que/puisque）
+  //     本身就是从句标记，有没有逗号都断。
+  // 两个特例（裸奔时才检查，有逗号也一样）：
+  //   but 排除 "all but"（"had all but disappeared" 不是断句点）；
+  //   so 要求后面跟代词/指示词（"so I slept" 断，"so tired" 不断）。
+  const CLAUSE_COMMA = /^(?:and|but|or|nor|so|yet|et|mais|donc|car|ou|ni)$/i;
+  const CLAUSE_BARE = /^(?:but|because|even if|as if|parce que|puisque)$/i;
+  const CLAUSE_SO_FOLLOW = /^(?:i|you|he|she|it|we|they|there|this|that|these|those)$/i;
 
   function findClauseBreak(text) {
     const t = String(text || "");
     if (t.length <= CLAUSE_MIN_LEN) return -1;
-    const re = /[,;:：；]\s*([A-Za-z]+)/g;
+    // 逗号组可选：有逗号走并列/从属都行，没逗号只收从属连词。
+    // 多词连词（even if/parce que）放前面，\s+ 容忍 ASR 空格。
+    const re = /(,|;|:|：|；)?\s*\b(even\s+if|as\s+if|parce\s+que|puisque|because|and|but|or|nor|so|yet|et|mais|donc|car|ou|ni)\b/gi;
+    const COMMA_OK = /^(?:and|but|or|nor|so|yet|et|mais|donc|car|ou|ni)$/;
+    const BARE_OK = /^(?:but|because|even if|as if|parce que|puisque)$/;
     let m;
     let best = -1;
     let bestScore = Infinity;
     while ((m = re.exec(t)) !== null) {
-      if (!CLAUSE_CONJ.test(m[1])) continue;
-      const commaIdx = m.index;
-      const before = t.charAt(commaIdx - 1);
-      // 数字里的逗号（1,000）不算断点
-      if (!/[A-Za-z"'”’)\]】》」』]/.test(before)) continue;
-      const cut = commaIdx + 1; // 逗号归前半（尾逗号会被 incompleteMark 转成 …）
+      const hasComma = !!m[1];
+      const word = m[2].replace(/\s+/g, " ").toLowerCase();
+      // 无逗号的 and/or/et/ou…一律不要（名词短语重灾区）
+      if (!hasComma && !BARE_OK.test(word) && word !== "so") continue;
+      // 有逗号也要是连词（防止标点后普通词误入）
+      if (hasComma && !COMMA_OK.test(word) && !BARE_OK.test(word) && word !== "so") continue;
+      if (hasComma) {
+        // 数字里的逗号（1,000）不算断点（À-ÿ 覆盖法语 étoilé, 这类重音结尾）
+        const before = t.charAt(m.index - 1);
+        if (!/[A-Za-zÀ-ÿ"'”’)\]】》」』]/.test(before)) continue;
+      }
+      // 词首下标：连词在整个匹配串里的偏移（前面可能有逗号+空格）
+      const wStart = m.index + m[0].toLowerCase().indexOf(m[2].toLowerCase());
+      if (word === "but") {
+        // "all but disappeared" 不是断句点
+        const prev = /([A-Za-zÀ-ÿ]+)\s*$/.exec(t.slice(0, wStart));
+        if (prev && prev[1].toLowerCase() === "all") continue;
+      }
+      if (word === "so") {
+        // "so tired" 不断，"so I slept" 断
+        const next = /^\s*([A-Za-zÀ-ÿ]+)/.exec(t.slice(wStart + m[2].length));
+        if (!next || !CLAUSE_SO_FOLLOW.test(next[1])) continue;
+      }
+      // 逗号归前半（尾逗号会被 incompleteMark 转成 …）；裸连词从词首断
+      const cut = hasComma ? m.index + 1 : wStart;
       const tail = t.slice(cut).replace(/^\s+/, "");
       if (cut < CLAUSE_MIN_HEAD || tail.length < CLAUSE_MIN_TAIL) continue;
       const score = Math.abs(cut - t.length / 2);
@@ -1164,6 +1199,18 @@
     "Stille", "silencio", "silenzio", "无声", "寂静", "安静", "沈黙", "静寂", "침묵", "тишина", "صمت",
     "gunshot", "explosion", "thunder", "siren", "noise", "枪声", "爆炸", "雷声", "噪音", "выстрел", "взрыв",
     "sigh", "叹气", "叹息",
+    "yawn", "sneeze", "cough", "sniff", "gasp", "panting", "breathing", "heartbeat",
+    "footsteps", "knock", "knocking", "ring", "ringing", "buzz", "buzzing",
+    "whistle", "whistling", "murmur", "murmuring", "whisper", "whispering", "mumble", "mumbling",
+    "sob", "sobbing", "crying", "booing",
+    "bostezo", "estornudo", "tos", "suspiro", "llanto", "murmullo", "silbido",
+    "Gähnen", "Niesen", "Husten", "Seufzer", "Flüstern",
+    "sbadiglio", "starnuto", "tosse", "sospiro",
+    "bocejo", "espirro", "tosse", "suspiro",
+    "grognement", "grognements", "soupir", "toux", "éternuement", "pleurs",
+    "murmure", "chuchotement", "sifflement", "bâillement",
+    "くしゃみ", "咳", "ため息", "재채기", "기침", "한숨",
+    "чихание", "кашель", "вздох", "шёпот", "عطس", "سعال", "تنهد", "همس",
   ];
   const NON_SPEECH_INNER = new RegExp("(?:" + NON_SPEECH_WORDS.join("|") + ")", "i");
   const NON_SPEECH_BARE = new RegExp("^(?:" + NON_SPEECH_WORDS.join("|") + ")[.!?…]*$", "i");
