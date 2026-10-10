@@ -9,7 +9,7 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.5.1</span>
+      <span class="ver">v0.6.0</span>
     </header>
 
     <div id="fatal" class="fatal" style="display: none"></div>
@@ -52,9 +52,14 @@
     <section>
       <div class="title">翻译引擎</div>
       <select id="translator">
-        <option value="google">Google 免费端点（无需 Key）</option>
-        <option value="ai">AI 翻译（OpenAI 兼容接口）</option>
+        <option value="ai">AI 翻译（本地模型，质量最好，推荐）</option>
+        <option value="google">Google 免费端点（秒回，质量一般）</option>
       </select>
+      <p class="note">
+        AI 引擎需要先启动本地桥接服务：<br />
+        在 <code>youtube-translate-ext\bridge</code> 目录运行 <code>node server.mjs</code><br />
+        用法：<b>bridge\启动翻译桥.bat</b>
+      </p>
 
       <div id="aiBox" class="ai-box">
         <label class="col">

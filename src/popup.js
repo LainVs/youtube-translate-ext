@@ -5,7 +5,7 @@ const DEFAULTS = {
   bilingual: true,
   hideNative: false,
   targetLang: "zh-CN",
-  translator: "google",
+  translator: "ai",
   aiBaseUrl: "http://localhost:8788/v1",
   aiApiKey: "",
   aiModel: "opencode/big-pickle",

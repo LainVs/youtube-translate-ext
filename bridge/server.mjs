@@ -29,7 +29,11 @@ import path from "node:path";
 
 const PORT = Number(process.env.BRIDGE_PORT || 8788);
 const FORCED_MODEL = process.env.OPENCODE_MODEL || "";
-const TIMEOUT_MS = Number(process.env.OPENCODE_TIMEOUT || 120000);
+// 超时上限。opencode run 每次都要 spawn 新进程，冷启动波动很大：
+// 实测同一批 8 条字幕，快的 17s、慢的 45s 就超时挂了。
+// 所以要给足余量——反正失败重试会在更外层兜住，多等一会儿
+// 比整批重跑划算得多。
+const TIMEOUT_MS = Number(process.env.OPENCODE_TIMEOUT || 90000);
 const MOCK = process.env.BRIDGE_MOCK === "1";
 const DEFAULT_MODEL = "opencode/big-pickle";
 
@@ -110,6 +114,81 @@ function stripFences(s) {
   return String(s).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
 
+/**
+ * 清洗模型输出：字幕只需要一句纯译文。
+ *
+ * 实测不加约束时模型会返回这种东西：
+ *   "这句意思其实是：**我心里早就有感觉了…**
+ *    口语化一点，可以翻成：
+ *    - 主版本：「我觉得我心底里其实早就知道了…」
+ *    几个备选，语气略有不同：..."
+ *
+ * 这些对字幕全是噪音 —— 会把整块 UI 撑爆。所以这里逐层剥离：
+ *   1) markdown 强调符号
+ *   2)「主版本 / 备选 / 推荐」这类小标题
+ *   3) 项目符号行
+ *   4) 引号 / 方括号包裹
+ * 保留第一句有实质内容的译文。
+ */
+function cleanSubtitle(s) {
+  let t = stripFences(s);
+
+  // 剥掉模型泄漏出来的思维链。实测出现过整句思考被当译文返回：
+  //   "The user wants me to translate subtitles. Let me output only the translation."
+  // 判据：整段是英文、且不含中日韩字符、且含第三人称/指令式口气。
+  t = t
+    .split(/\r?\n/)
+    .filter((line) => {
+      const l = line.trim();
+      if (!l) return false;
+      const hasCJK = /[一-鿿぀-ヿ]/.test(l);
+      if (hasCJK) return true;
+      // 纯英文行：只有当它看起来是译文本身才留。
+      // 指令/思考口气的特征词一律丢弃。
+      if (/^(the user|i need to|let me|i should|i will|i'll|to translate|translation:|note:|here is|here's|the translation)/i.test(l)) {
+        return false;
+      }
+      // 英文句子很少出现在中译字幕里，除非原文就是英文专有名词
+      return l.length <= 40 && !/[.!?]$/.test(l);
+    })
+    .join("\n")
+    .trim();
+  if (!t) t = stripFences(s);
+
+  // 去掉 markdown 强调与行内标记
+  t = t.replace(/\*\*|__|`{1,3}|~~/g, "");
+
+  // 如果是多行结构说明，取「有内容的第一个引号译文」优先
+  const quoted = t.match(/[「『"“]([^」』"”\n]{2,})[」』"”]/);
+  const lines = t.split(/\r?\n/).map((l) => l.trim());
+
+  // 丢掉明显的说明性行
+  const NOISE = /^(译文|主版本|备选|推荐|口语化|如果|需要|可以|以下是|几种|说明|注[:：]|例如|希望|如果你|请)/;
+  const useful = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (NOISE.test(line)) continue;
+    if (/^[-*+•]\s*/.test(line)) continue;       // 项目符号
+    if (/^\d+[.、)]\s*/.test(line)) continue;     // 编号
+    if (line.length < 2) continue;
+    useful.push(line);
+  }
+
+  let out;
+  if (useful.length) {
+    out = useful[0];
+  } else if (quoted) {
+    out = quoted[1];
+  } else {
+    out = t.replace(/\s+/g, " ");
+  }
+
+  // 剥掉包裹引号和多余前缀
+  out = out.replace(/^[「『"“]+/, "").replace(/[」』"”]+$/, "");
+  out = out.replace(/^(译文|主版本|推荐译法)\s*[:：]\s*/, "");
+  return out.replace(/\s+/g, " ").trim();
+}
+
 /** 解析 `opencode run --format json` 的事件流，拼接 text 片段 */
 function extractText(stdout) {
   const texts = [];
@@ -118,6 +197,10 @@ function extractText(stdout) {
     if (!s || s[0] !== "{") continue;
     try {
       const ev = JSON.parse(s);
+      // 跳过思维链。实测带「只输出译文」约束时，部分模型会先吐一段
+      // 英文思考（"The user wants me to translate…"）再给译文，
+      // 直接拼起来会把思考过程当成译文显示出来。
+      if (ev.type === "reasoning" || ev.type === "thinking") continue;
       if (ev.type === "text" && ev.part && typeof ev.part.text === "string") texts.push(ev.part.text);
     } catch {
       /* 跳过非 JSON 行 */
@@ -145,7 +228,20 @@ function runCli(prompt, model) {
       return reject(new Error("提示词过长 (" + prompt.length + " 字符)，请减小批大小"));
     }
 
-    const args = ["run", "--format", "json", "--model", normalizeModel(model), prompt];
+    // 字幕翻译必须短平快：
+    // --format json          输出可解析的事件流
+    // 禁止任何形式的解释、markdown、备选方案，只��纯译文。
+    // 不加这些约束时实测模型会返回「几个备选 + 建议补充上下文」，
+    // 单句耗时 6~33 秒，字幕根本没法用。
+    const TIGHT_SUFFIX =
+      "\n\n【输出约束·必须严格遵守】" +
+      "1. 只输出译文本身，一句都不要多。\n" +
+      "2. 禁止任何解释、前言、markdown 标题、列表、编号、引号包裹。\n" +
+      "3. 禁止给备选方案，禁止反问，禁止要求补充上下文。\n" +
+      "4. 译文长度不超过原文的 1.2 倍。\n" +
+      "5. 现在直接输出译文，第一个字符就是译文。";
+
+    const args = ["run", "--format", "json", "--model", normalizeModel(model), prompt + TIGHT_SUFFIX];
     // stdin 必须是 ignore：若留成打开的 pipe，CLI 会一直等待 EOF 而卡死。
     const child = spawn(cli, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
 
@@ -198,7 +294,7 @@ function mockTranslate(prompt) {
 async function generate(prompt, model) {
   if (MOCK) return mockTranslate(prompt);
   const raw = await runCli(prompt, model);
-  return stripFences(raw);
+  return cleanSubtitle(raw);
 }
 
 /* ------------------------------ HTTP 服务 ------------------------------ */

@@ -346,6 +346,31 @@ footer {
   border-top: 1px solid #2d2d31;
 }
 
+.note {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #1c1c21;
+  border: 1px solid #2e2e34;
+  color: #9a9aa3;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.note code {
+  background: #26262b;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: #cfcfd6;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 11px;
+}
+
+.note b {
+  color: #7bd88f;
+  font-weight: 600;
+}
+
 button {
   padding: 6px 12px;
   border: 1px solid #3a3a40;

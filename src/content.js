@@ -19,8 +19,10 @@
     bilingual: true,
     hideNative: false,
     targetLang: "zh-CN",
-    translator: "google", // google | ai
-    // AI（OpenAI 兼容接口）
+    // google = 免费端点，秒回但质量一般
+    // ai     = 本地 LLM 桥接（8788），质量高但每批几秒
+    translator: "ai",
+    // AI（OpenAI 兼容接口，默认指向本地 bridge）
     aiBaseUrl: "http://localhost:8788/v1",
     aiApiKey: "",
     aiModel: "opencode/big-pickle",
