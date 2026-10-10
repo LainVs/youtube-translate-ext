@@ -195,6 +195,11 @@ async function safeOne(text, targetLang) {
 const AI_BATCH = 12;
 const AI_CONCURRENCY = 2;
 const AI_TIMEOUT_MS = 120000;
+// 单次 TRANSLATE_BATCH 调用的总死线：整批 aiOnce 最多 120s，剩下的给逐条
+// fallback。没有它时，一次整批超时就会退化成 12 条逐条串行（每条再 120s），
+// 单批最坏 25 分钟——content 侧看着就是"一直 0/191"。
+// 超时的部分不记死罪：没翻完的下次轮询继续（missA 会重新排上）。
+const AI_DEADLINE_MS = 300000;
 
 async function aiOnce(texts, cfg, targetLang, langName) {
   const base = (cfg.aiBaseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
@@ -219,9 +224,10 @@ async function aiOnce(texts, cfg, targetLang, langName) {
       body: JSON.stringify({
         model: cfg.aiModel || "gpt-4o-mini",
         temperature: 0.2,
-        // 限输出：字幕一条通常几十字，按每条 150 token 估上限。
-        // 不设的话模型偶尔长篇大论（解释+备选），又慢又要清洗。
-        max_tokens: Math.min(4000, 120 + texts.length * 150),
+        // 限输出：字幕一条通常几十字，按每条 300 token 估上限。
+        // 不设的话模型偶尔长篇大论（解释+备选），又慢又要清洗；
+        // 设太小会截断 JSON 导致整批解析失败——宁大勿小，桥接另有清洗兜底。
+        max_tokens: Math.min(8000, 300 + texts.length * 300),
         messages: [
           { role: "system", content: system },
           { role: "user", content: JSON.stringify(texts) },
@@ -291,6 +297,7 @@ async function translateAI(texts, cfg) {
 
   // 批间并发（串行会被单条 30 秒拖死）
   const results = new Array(texts.length);
+  const t0 = Date.now();
   let cursor = 0;
   async function worker() {
     while (cursor < batches.length) {
@@ -303,6 +310,12 @@ async function translateAI(texts, cfg) {
       } catch (e) {
         // 整批失败时逐条再试一次（有时是长度问题），仍失败就保留原文
         for (let j = 0; j < slice.length; j++) {
+          // 总死线：别在一条 doomed 调用里把 12 个 120s 全熬完，
+          // 剩下的下次轮询再翻（content 侧 60 秒复探会回来）。
+          if (Date.now() - t0 > AI_DEADLINE_MS - AI_TIMEOUT_MS) {
+            for (let k = j; k < slice.length; k++) results[offset + k] = slice[k];
+            break;
+          }
           try {
             const one = await aiOnce([slice[j]], cfg, targetLang, langName);
             results[offset + j] = one[0];

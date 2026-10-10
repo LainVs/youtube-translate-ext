@@ -113,6 +113,9 @@
   let position = null;            // { left, bottom }
   let playerEl = null;
   let saveTimer = null;
+  // 失败自愈定时器：整轮颗粒无收（桥接挂了）时不再硬刷 16 个 doomed chunk，
+  // 停下来 60 秒后再探。切视频/cleanup 时清掉，避免旧视频的定时器复活。
+  let retryTimer = null;
 
   const CACHE_PREFIX = "ytbs_cache_";
 
@@ -320,6 +323,8 @@
     if (!force && videoId === currentVideoId) return;
 
     const token = ++loadToken;
+    clearTimeout(retryTimer);
+    retryTimer = null;
     currentVideoId = videoId;
     cleanupUI();
     cueList = [];
@@ -1558,6 +1563,51 @@
     }, 1500);
   }
 
+  // 失败自愈：整轮颗粒无收说明桥接/网络挂了，硬刷完 16 个 chunk
+  // 只会烧掉所有句子的重试额度（这就是"一直 0"的成因），且毫无产出。
+  // 停下来，toast 给用户一句人话，60 秒后自动复探；桥好了自己恢复。
+  function scheduleReprobe(token, why) {
+    if (token !== loadToken || !config.enabled) return;
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (token !== loadToken || !config.enabled || !cueList.length) return;
+      // 复探前清掉失败计数：上一轮"3 次用完永久放弃"是死局，
+      // 间隔 60 秒的轮次之间必须给 fresh 预算，否则桥恢复了也翻不动。
+      for (const k of Array.from(failedAttempts.keys())) failedAttempts.delete(k);
+      ensureTranslations(0);
+    }, 60000);
+    LOG("已安排 60 秒后复探:", why);
+  }
+
+  // 跑一批 chunk，连续 CONSEC_ABORT 个颗粒无收就停（桥挂了），返回 false。
+  // 状态里带"第 i/k 批"：慢和卡死看着都是数字不动，但结合 console 里
+  // 的单批耗时能区分（慢=每批几十秒有产出，卡死=某批计时永远不结束）。
+  async function runSweep(list, chunkSize, token, engine, statusPrefix, totalForStatus, countFn) {
+    const totalBatches = Math.max(1, Math.ceil(list.length / chunkSize));
+    let consecFail = 0;
+    for (let i = 0; i < list.length; i += chunkSize) {
+      if (token !== loadToken || !config.enabled) return false;
+      const batchNo = Math.floor(i / chunkSize) + 1;
+      const chunk = list.slice(i, i + chunkSize);
+      const t0 = Date.now();
+      const ok = await runChunk(chunk, token, engine);
+      LOG(engine + " 第 " + batchNo + "/" + totalBatches + " 批:", ok + "/" + chunk.length + " 成功，用时 " + ((Date.now() - t0) / 1000).toFixed(1) + "s");
+      if (ok > 0) {
+        consecFail = 0;
+      } else if (++consecFail >= 3) {
+        const hint = engine === "ai" ? "AI 桥接无响应，Google 先顶着，60 秒后自动重试" : "Google 断连，60 秒后自动重试";
+        setStatus(hint);
+        showToast(hint, true);
+        scheduleReprobe(token, engine + " 连续 " + consecFail + " 批零成功");
+        return false;
+      }
+      setStatus(statusPrefix + countFn(totalForStatus) + "/" + totalForStatus.length + " · 第 " + batchNo + "/" + totalBatches + " 批");
+      await sleep(120);
+    }
+    return true;
+  }
+
   async function ensureTranslations(depth) {
     depth = depth || 0;
     if (!cueList.length || !config.enabled) return;
@@ -1584,13 +1634,8 @@
     let pendingG = rotateToCurrent(texts.filter(missG));
     if (pendingG.length) {
       setStatus("Google 打底… 0/" + pendingG.length);
-      for (let i = 0; i < pendingG.length; i += CHUNK_GOOGLE) {
-        if (token !== loadToken || !config.enabled) return;
-        const chunk = pendingG.slice(i, i + CHUNK_GOOGLE);
-        await runChunk(chunk, token, "google");
-        setStatus("Google 打底… " + countOk(pendingG) + "/" + pendingG.length);
-        await sleep(120);
-      }
+      const doneG = await runSweep(pendingG, CHUNK_GOOGLE, token, "google", "Google 打底… ", pendingG, countOk);
+      if (!doneG) return; // 桥挂了：已安排复探，本轮到此为止
     }
 
     if (!hybrid) {
@@ -1609,25 +1654,29 @@
       return;
     }
     setStatus("AI 覆盖… " + countAi(texts) + "/" + texts.length);
-    for (let i = 0; i < pendingA.length; i += CHUNK_AI) {
-      if (token !== loadToken || !config.enabled) return;
-      const chunk = pendingA.slice(i, i + CHUNK_AI);
-      await runChunk(chunk, token, "ai");
-      setStatus("AI 覆盖… " + countAi(texts) + "/" + texts.length);
-      await sleep(120);
-    }
+    const doneA = await runSweep(pendingA, CHUNK_AI, token, "ai", "AI 覆盖… ", texts, countAi);
+    if (!doneA) return; // 桥挂了：已安排复探，本轮到此为止
 
     renderCue(lastIndex, true);
     savePersistentNow();
 
-    // 补翻：只补 AI 层长尾。之前当前句失败要等整轮跑完 +8s（十几分钟），
-    // 现在当前句由 tick 里的 ensureCurrent 秒级兜底，这里只管长尾，最多两轮。
+    // 补翻长尾：8 秒后一轮（给新失败 fresh 预算），两轮后转入 60 秒慢轮询。
+    // 之前是"3 次用完永久放弃"——桥在视频打开时没起来，整集 0/191 卡到死，
+    // 而此时弹窗单句测试却是通的（桥后来起来了），看着像灵异事件。
+    // 现在：只要还有没覆盖的，隔 60 秒自己再扫，直到翻完或切视频。
     const still = texts.filter(missA);
     finishStatus(texts, "ai", still.length);
-    if (still.length && depth < 2 && token === loadToken && config.enabled) {
-      await sleep(8000);
-      if (token !== loadToken || !config.enabled) return;
-      await ensureTranslations(depth + 1);
+    if (still.length && token === loadToken && config.enabled) {
+      if (depth < 2) {
+        await sleep(8000);
+        if (token !== loadToken || !config.enabled) return;
+        for (const k of Array.from(failedAttempts.keys())) {
+          if (k.indexOf("ai|") === 0) failedAttempts.delete(k);
+        }
+        await ensureTranslations(depth + 1);
+      } else {
+        scheduleReprobe(token, "AI 长尾 " + still.length + " 条未覆盖");
+      }
     }
   }
 
@@ -1678,6 +1727,9 @@
       },
     });
 
+    // 返回成功数（不是尝试数）：上游靠它判断"桥接是不是挂了"，
+    // 之前固定返回 chunk.length，全败和全胜长得一样，假象就是这么来的。
+    let ok = 0;
     if (res && Array.isArray(res.translations)) {
       for (let j = 0; j < chunk.length; j++) {
         const tr = res.translations[j];
@@ -1686,6 +1738,7 @@
         if (!isPoisonedTranslation(chunk[j], tr)) {
           setCached(chunk[j], tr, engine);
           failedAttempts.delete(key);
+          ok++;
         } else {
           failedAttempts.set(key, (failedAttempts.get(key) || 0) + 1);
         }
@@ -1699,7 +1752,7 @@
 
     renderCue(lastIndex, true);
     scheduleSavePersistent();
-    return chunk.length;
+    return ok;
   }
 
   // ---- 页面主世界桥（main-fetch.js 在 world: MAIN 中执行，避免被 YT 判为扩展流量）----
@@ -1740,14 +1793,32 @@
     });
   }
 
+  // 后台单次调用的最坏情况：AI_BATCH 整批超时 120s + 逐条 fallback。
+  // background 里 translateAI 有 300s 总死线，所以这里 330s 只可能在
+  // 「SW 被杀/端口断掉、回调永远不回来」的真挂起时触发。
+  // 没有这个超时，12 条一批卡住一次，整集就永远 0/191（本次故障原文）。
+  const SEND_BG_TIMEOUT_MS = 330000;
+
   function sendBg(type, payload) {
     return new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        resolve({ error: "后台响应超时（330s）：请求可能卡在桥接，稍后自动重试" });
+      }, SEND_BG_TIMEOUT_MS);
       try {
         chrome.runtime.sendMessage(Object.assign({ type }, payload), (r) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
           if (chrome.runtime.lastError) resolve({ error: chrome.runtime.lastError.message });
           else resolve(r);
         });
       } catch (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
         resolve({ error: String(e) });
       }
     });
@@ -2590,6 +2661,8 @@
 
   function cleanup() {
     loadToken++;
+    clearTimeout(retryTimer);
+    retryTimer = null;
     cleanupUI();
     cueList = [];
     translationCache.clear();
