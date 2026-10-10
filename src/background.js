@@ -186,12 +186,13 @@ async function safeOne(text, targetLang) {
  * 批量参数。
  *
  * 实测：本地桥接每次都要 spawn `opencode run` 新进程，冷启动波动大
- * （同一批 8 条，快的 17s，慢的 45s 就超时）。所以：
- *   - 批次别贪大，6 条一批比较稳
- *   - 并发压到 2，避免多个 opencode 进程互相抢资源导致更慢
+ * （同一批 8 条，快的 17s，慢的 45s 就超时）。混合模式下 Google 已经
+ * 打底，AI 只管后台覆盖，不怕单批慢一点，所以：
+ *   - 批次放到 12 条：spawn 次数减半，冷启动成本摊薄，总时间接近减半
+ *   - 并发保持 2，避免多个 opencode 进程互相抢资源导致更慢
  *   - 超时由桥接的 90s 兜住，这里再留一点余量
  */
-const AI_BATCH = 6;
+const AI_BATCH = 12;
 const AI_CONCURRENCY = 2;
 const AI_TIMEOUT_MS = 120000;
 
@@ -200,12 +201,7 @@ async function aiOnce(texts, cfg, targetLang, langName) {
   const url = base + "/chat/completions";
 
   const system =
-    `你是一名专业的字幕翻译。把用户提供的 JSON 数组里的每一条翻译成${langName}。\n` +
-    `硬性要求：\n` +
-    `1. 输出必须是一个 JSON 字符串数组，长度和顺序与输入完全一致。\n` +
-    `2. 只输出这个数组，不要任何解释、前言、markdown 标题、编号或代码块标记。\n` +
-    `3. 不要给备选方案，不要反问，不要要求补充上下文。\n` +
-    `4. 译文口语化、自然，贴合口语表达，不要直译腔。`;
+    `Translate input JSON array to ${langName}, return ONLY same-length JSON array. No explanations/markdown/alternatives. Colloquial.`;
 
   const headers = { "Content-Type": "application/json" };
   if (cfg.aiApiKey) headers["Authorization"] = "Bearer " + cfg.aiApiKey;
@@ -223,6 +219,9 @@ async function aiOnce(texts, cfg, targetLang, langName) {
       body: JSON.stringify({
         model: cfg.aiModel || "gpt-4o-mini",
         temperature: 0.2,
+        // 限输出：字幕一条通常几十字，按每条 150 token 估上限。
+        // 不设的话模型偶尔长篇大论（解释+备选），又慢又要清洗。
+        max_tokens: Math.min(4000, 120 + texts.length * 150),
         messages: [
           { role: "system", content: system },
           { role: "user", content: JSON.stringify(texts) },

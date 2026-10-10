@@ -20,7 +20,7 @@
     hideNative: false,
     targetLang: "zh-CN",
     // google = 免费端点，秒回但质量一般
-    // ai     = 本地 LLM 桥接（8788），质量高但每批几秒
+    // ai     = 混合模式：Google 打底秒出 + 本地 LLM（8788）逐步覆盖，质量最高
     translator: "ai",
     // AI（OpenAI 兼容接口，默认指向本地 bridge）
     aiBaseUrl: "http://localhost:8788/v1",
@@ -81,12 +81,18 @@
   let domHintTimer = null;
 
   let cueList = [];               // [{ start, end, dur, text }]
-  const translationCache = new Map(); // cacheKey -> 译文
-  // 翻译失败计数：cacheKey -> 连续失败次数。失败**不进缓存**（否则
-  // 「133/133 已翻译」全是假数），由 ensureTranslations 补翻；
-  // 超过上限才放弃，避免对永久失败的句子无限重试。
+  // 混合翻译缓存：cacheKey -> { t: 译文, s: 来源 "google" | "ai" }。
+  // AI 引擎 = Google 打底（秒出）+ AI 逐步覆盖（高质量）：
+  // 同一条先有 Google 版保证实时可看，AI 出来后原位覆盖；
+  // 显示和导出都优先 AI，没有 AI 才用 Google，绝不回退原文。
+  // key 里不再带引擎名（v2），两套来源共享同一条目。
+  const translationCache = new Map();
+  // 翻译失败计数：engine|cacheKey -> 次数。失败**不进缓存**；
+  // 按引擎分别计数，Google 失败不影响 AI 重试额度，反之亦然。
   const failedAttempts = new Map();
   const MAX_RETRANSLATE = 3;
+  // 当前句紧急补翻的在途 guard（tick 100ms 一次，没它会炸出几十个重复请求）
+  const urgentInflight = new Set();
 
   let wrapper = null;             // 全尺寸定位层
   let box = null;                 // 字幕框
@@ -220,6 +226,8 @@
         const next = Object.assign({}, config);
         let needRetranslate = false;
         let needRestyle = false;
+        let needClearAll = false;
+        let needDropAi = false;
 
         for (const key of Object.keys(changes)) {
           if (key === "subtitlePosition") continue;
@@ -227,6 +235,10 @@
           if (["targetLang", "translator", "aiBaseUrl", "aiApiKey", "aiModel"].includes(key)) {
             needRetranslate = true;
           }
+          if (key === "targetLang") needClearAll = true;
+          // 换模型只丢 AI 覆盖层：Google 打底保留，AI 按新模型重盖，
+          // 切换过程画面不断档。
+          if (key === "aiModel") needDropAi = true;
           if (["originalColor", "translatedColor", "originalSize", "translatedSize", "fontScale", "bilingual", "bgColor", "bgOpacity", "boxRadius", "boxPadding", "outline", "fontFamily", "originalWeight", "translatedWeight"].includes(key)) {
             needRestyle = true;
           }
@@ -239,9 +251,16 @@
         if (config.hideNative !== wasHideNative) applyNativeVisibility();
         if (needRestyle) applyStyles();
 
-        if (needRetranslate) {
+        if (needClearAll) {
           translationCache.clear();
           failedAttempts.clear();
+        } else if (needDropAi) {
+          for (const [k, e] of translationCache) {
+            if (e && e.s === "ai") translationCache.delete(k);
+          }
+          for (const k of Array.from(failedAttempts.keys())) {
+            if (k.indexOf("ai|") === 0) failedAttempts.delete(k);
+          }
         }
 
         if (!wasEnabled && config.enabled) {
@@ -1252,7 +1271,48 @@
 
   // ============================== 翻译 ==============================
   function cacheKey(text) {
-    return config.translator + "|" + config.targetLang + "|" + text;
+    return "v2|" + (config.targetLang || "") + "|" + text;
+  }
+
+  // AI 引擎即混合模式：Google 打底 + AI 覆盖。只有选 google 才是纯 Google。
+  function isHybrid() {
+    return config.translator === "ai";
+  }
+
+  function getEntry(text) {
+    const e = translationCache.get(cacheKey(text));
+    return e && typeof e.t === "string" && e.t ? e : null;
+  }
+
+  function entryFor(text, engine) {
+    const e = getEntry(text);
+    return e && e.s === engine ? e.t : "";
+  }
+
+  // 显示/导出统一入口：AI 优先，没有 AI 用 Google，都没有返回 ""。
+  // 纯 google 模式下 AI 条目不可见（切引擎不串味）。
+  function pickTr(text) {
+    const e = getEntry(text);
+    if (!e) return "";
+    if (!isHybrid() && e.s === "ai") return "";
+    return e.t;
+  }
+
+  function aiCovered(text) {
+    const e = getEntry(text);
+    return !!e && e.s === "ai";
+  }
+
+  function setCached(text, tr, src) {
+    const key = cacheKey(text);
+    const cur = translationCache.get(key);
+    // 迟到/并发的 Google 不允许降级 AI（紧急 Google 单条和 AI 扫覆盖同一句时会撞车）
+    if (cur && cur.s === "ai" && src !== "ai") return;
+    translationCache.set(key, { t: tr, s: src });
+  }
+
+  function failKey(engine, text) {
+    return engine + "|" + cacheKey(text);
   }
 
   /**
@@ -1289,12 +1349,16 @@
           if (
             entry &&
             entry.lang === config.targetLang &&
-            entry.translator === config.translator &&
             entry.map
           ) {
             let n = 0;
             for (const text in entry.map) {
-              const tr = entry.map[text];
+              const raw = entry.map[text];
+              // 新格式 { t, s }，兼容旧格式纯字符串（来源按当时引擎认）。
+              const tr = raw && typeof raw === "object" ? raw.t : raw;
+              const src = raw && typeof raw === "object" && (raw.s === "ai" || raw.s === "google")
+                ? raw.s
+                : (entry.translator === "ai" ? "ai" : "google");
               // 旧版本把失败回退的原文也存进去了（译文 === 原文），
               // 下次加载必须跳过，否则那一两句永远是英文且永不重翻。
               // 例外：目标就是英文时相同是合理的。
@@ -1302,8 +1366,13 @@
               if (base !== "en" && typeof tr === "string" && tr.trim() === String(text).trim()) {
                 continue;
               }
-              if (!translationCache.has(cacheKey(text))) {
-                translationCache.set(cacheKey(text), entry.map[text]);
+              if (typeof tr !== "string" || !tr) continue;
+              const key = cacheKey(text);
+              const cur = translationCache.get(key);
+              // AI 覆盖 Google：后加载的不允许把高质量条目降级。
+              if (cur && cur.s === "ai" && src !== "ai") continue;
+              if (!cur) {
+                translationCache.set(key, { t: tr, s: src });
                 n++;
               }
             }
@@ -1328,9 +1397,9 @@
     const map = {};
     let count = 0;
     for (const c of cueList) {
-      const tr = translationCache.get(cacheKey(c.text));
-      if (tr) {
-        map[c.text] = tr;
+      const e = translationCache.get(cacheKey(c.text));
+      if (e && e.t) {
+        map[c.text] = { t: e.t, s: e.s };
         count++;
         if (count >= 4000) break; // 单视频上限，避免存储过大
       }
@@ -1352,10 +1421,78 @@
     }
   }
 
+  // CHUNK_GOOGLE 大一点：Google 后台内部会拼成 ≤4500 字符的大请求，
+  // chunk 只是减少 content↔background 往返次数。
+  const CHUNK_GOOGLE = 30;
+  // CHUNK_AI 与后台 AI_BATCH 对齐：一批 TRANSLATE_BATCH = 一次 spawn，
+  // 冷启动成本均摊到 12 条上。
+  const CHUNK_AI = 12;
+  // AI 优先覆盖播放点前后这些条，保证眼睛看到的是高质量版。
+  const AI_WINDOW = 40;
+
+  // 当前播放句轮转到队头（启动时 lastIndex 可能为 -1，此时原样返回）
+  function rotateToCurrent(list) {
+    if (lastIndex >= 0 && cueList[lastIndex]) {
+      const cur = cueList[lastIndex].text;
+      const at = list.indexOf(cur);
+      if (at > 0) return list.slice(at).concat(list.slice(0, at));
+    }
+    return list;
+  }
+
+  // AI 覆盖顺序：播放点窗口优先，其余按原序后台扫
+  function orderAi(list) {
+    if (lastIndex < 0 || !cueList[lastIndex]) return list;
+    const win = new Set();
+    const lo = Math.max(0, lastIndex - AI_WINDOW);
+    const hi = Math.min(cueList.length - 1, lastIndex + AI_WINDOW);
+    for (let i = lo; i <= hi; i++) win.add(cueList[i].text);
+    const head = list.filter((t) => win.has(t));
+    if (!head.length) return list;
+    return head.concat(list.filter((t) => !win.has(t)));
+  }
+
+  // 成功数（进了缓存的），不是尝试数：失败的不进缓存，
+  // 之前用 done += chunk.length 会把失败也算成「已翻译」，全是假数。
+  function countOk(list) {
+    let n = 0;
+    for (const t of list) if (pickTr(t)) n++;
+    return n;
+  }
+
+  function countAi(list) {
+    let n = 0;
+    for (const t of list) if (aiCovered(t)) n++;
+    return n;
+  }
+
+  function setStatus(s) {
+    if (statusEl) {
+      statusEl.textContent = s;
+      statusEl.style.display = "";
+    }
+  }
+
+  function finishStatus(texts, phase, stillN) {
+    if (!statusEl) return;
+    if (phase === "google") {
+      statusEl.textContent = "已翻译 " + countOk(texts) + "/" + texts.length + " 条";
+    } else {
+      const n = countAi(texts);
+      statusEl.textContent = stillN
+        ? "AI 覆盖 " + n + "/" + texts.length + "，其余 Google 显示"
+        : "AI 覆盖 " + n + "/" + texts.length;
+    }
+    setTimeout(() => {
+      if (statusEl) statusEl.style.display = "none";
+    }, 1500);
+  }
+
   async function ensureTranslations(depth) {
     depth = depth || 0;
     if (!cueList.length || !config.enabled) return;
     const token = loadToken;
+    const hybrid = isHybrid();
 
     const texts = [];
     const seen = new Set();
@@ -1365,60 +1502,58 @@
         texts.push(c.text);
       }
     }
+    if (!texts.length) return;
 
-    // 失败的不进缓存，所以这里能看到它们；超过上限的才放弃。
-    let pending = texts.filter(
-      (t) => !translationCache.has(cacheKey(t)) && (failedAttempts.get(cacheKey(t)) || 0) < MAX_RETRANSLATE
-    );
-    if (!pending.length) {
-      renderCue(lastIndex, true);
-      return;
-    }
+    // Google 缺的是「完全没条目」的（AI 已覆盖的不用打底）；
+    // AI 缺的是「没被 AI 覆盖」的。失败各自计数，互不影响额度。
+    const missG = (t) => !pickTr(t) && (failedAttempts.get(failKey("google", t)) || 0) < MAX_RETRANSLATE;
+    const missA = (t) => !aiCovered(t) && (failedAttempts.get(failKey("ai", t)) || 0) < MAX_RETRANSLATE;
 
-    // 优先翻当前正在看的句子：轮转到当前句开头，
-    // 否则用户盯着的那句恰好排在队尾，要等前面全翻完。
-    if (lastIndex >= 0 && cueList[lastIndex]) {
-      const cur = cueList[lastIndex].text;
-      const at = pending.indexOf(cur);
-      if (at > 0) {
-        pending = pending.slice(at).concat(pending.slice(0, at));
+    // —— 第一阶段：Google 打底（混合模式才有；纯 google 模式这就是全部）——
+    // 秒出：534 条约 1~2 分钟全覆盖，实时观看和「翻译中 12/534」从此消失。
+    let pendingG = rotateToCurrent(texts.filter(missG));
+    if (pendingG.length) {
+      setStatus("Google 打底… 0/" + pendingG.length);
+      for (let i = 0; i < pendingG.length; i += CHUNK_GOOGLE) {
+        if (token !== loadToken || !config.enabled) return;
+        const chunk = pendingG.slice(i, i + CHUNK_GOOGLE);
+        await runChunk(chunk, token, "google");
+        setStatus("Google 打底… " + countOk(pendingG) + "/" + pendingG.length);
+        await sleep(120);
       }
     }
 
-    if (statusEl) {
-      statusEl.textContent = "翻译中… 0/" + pending.length;
-      statusEl.style.display = "";
+    if (!hybrid) {
+      finishStatus(texts, "google");
+      renderCue(lastIndex, true);
+      savePersistentNow();
+      return;
     }
 
-    const CHUNK = 12;
-    let done = 0;
-
-    for (let i = 0; i < pending.length; i += CHUNK) {
+    // —— 第二阶段：AI 覆盖。先盖播放点窗口，再后台扫全集 ——
+    let pendingA = orderAi(texts.filter(missA));
+    if (!pendingA.length) {
+      finishStatus(texts, "ai");
+      renderCue(lastIndex, true);
+      savePersistentNow();
+      return;
+    }
+    setStatus("AI 覆盖… " + countAi(texts) + "/" + texts.length);
+    for (let i = 0; i < pendingA.length; i += CHUNK_AI) {
       if (token !== loadToken || !config.enabled) return;
-      const chunk = pending.slice(i, i + CHUNK);
-      await runChunk(chunk, token);
-      done += chunk.length;
-      if (statusEl) statusEl.textContent = "翻译中… " + done + "/" + pending.length;
+      const chunk = pendingA.slice(i, i + CHUNK_AI);
+      await runChunk(chunk, token, "ai");
+      setStatus("AI 覆盖… " + countAi(texts) + "/" + texts.length);
       await sleep(120);
     }
 
-    if (statusEl) {
-      const missing = pending.filter((t) => !translationCache.has(cacheKey(t))).length;
-      statusEl.textContent = missing
-        ? "已翻译 " + (pending.length - missing) + "/" + pending.length + " 条，" + missing + " 条稍后补翻"
-        : "已翻译 " + done + " 条";
-      setTimeout(() => {
-        if (statusEl) statusEl.style.display = "none";
-      }, 1500);
-    }
     renderCue(lastIndex, true);
     savePersistentNow();
 
-    // 补翻：偶发失败（模型超时、返回错位）等几秒再试，最多两轮。
-    // 之前是一锤子买卖，失败的那一两句永久是英文。
-    const still = pending.filter(
-      (t) => !translationCache.has(cacheKey(t)) && (failedAttempts.get(cacheKey(t)) || 0) < MAX_RETRANSLATE
-    );
+    // 补翻：只补 AI 层长尾。之前当前句失败要等整轮跑完 +8s（十几分钟），
+    // 现在当前句由 tick 里的 ensureCurrent 秒级兜底，这里只管长尾，最多两轮。
+    const still = texts.filter(missA);
+    finishStatus(texts, "ai", still.length);
     if (still.length && depth < 2 && token === loadToken && config.enabled) {
       await sleep(8000);
       if (token !== loadToken || !config.enabled) return;
@@ -1426,14 +1561,46 @@
     }
   }
 
-  /** 翻译一批文本（预取模式与 DOM 实时模式共用） */
-  async function runChunk(chunk, token) {
+  /** 当前句紧急补翻：tick 里字幕一切换就调。
+   * 队列再长也不等：Google 单条秒出先顶上（混合模式随后 AI 单条升级），
+   * 所以「进度 96/534 但眼前这句没中文」不会再出现。
+   * AI 紧急只试没败过的（败过的等后台扫，避免切台时连发 spawn 把桥打爆）。 */
+  function ensureCurrent(idx, token) {
+    if (idx < 0 || !cueList[idx] || !config.enabled) return;
+    if (token !== loadToken) return;
+    const text = cueList[idx].text;
+    if (pickTr(text)) return;
+    if (urgentInflight.has(text)) return;
+    urgentInflight.add(text);
+    (async () => {
+      try {
+        if (!entryFor(text, "google") && (failedAttempts.get(failKey("google", text)) || 0) < MAX_RETRANSLATE) {
+          await runChunk([text], token, "google");
+        }
+        if (
+          isHybrid() &&
+          !aiCovered(text) &&
+          (failedAttempts.get(failKey("ai", text)) || 0) === 0
+        ) {
+          await runChunk([text], token, "ai");
+        }
+      } finally {
+        urgentInflight.delete(text);
+      }
+    })();
+  }
+
+  /** 翻译一批文本（预取模式与 DOM 实时模式共用）。
+   * engine: "google" 打底 / "ai" 覆盖。AI 结果原位覆盖 Google，
+   * 失败（回退原文）不进缓存，各自记失败数，互不影响额度。 */
+  async function runChunk(chunk, token, engine) {
     if (!chunk || !chunk.length) return 0;
     if (token !== loadToken || !config.enabled) return 0;
+    engine = engine === "ai" ? "ai" : "google";
     const res = await sendBg("TRANSLATE_BATCH", {
       texts: chunk,
       config: {
-        translator: config.translator,
+        translator: engine,
         targetLang: config.targetLang,
         aiBaseUrl: config.aiBaseUrl,
         aiApiKey: config.aiApiKey,
@@ -1444,11 +1611,10 @@
     if (res && Array.isArray(res.translations)) {
       for (let j = 0; j < chunk.length; j++) {
         const tr = res.translations[j];
-        const key = cacheKey(chunk[j]);
+        const key = failKey(engine, chunk[j]);
         // 失败回退的原文不进缓存，进了就是永久英文 + 假计数。
-        // 记一次失败，ensureTranslations 会补翻。
         if (!isPoisonedTranslation(chunk[j], tr)) {
-          translationCache.set(key, tr);
+          setCached(chunk[j], tr, engine);
           failedAttempts.delete(key);
         } else {
           failedAttempts.set(key, (failedAttempts.get(key) || 0) + 1);
@@ -1922,15 +2088,18 @@
 
   /** 攒一小批再翻译，避免每翻一行都请求 */
   function requestDomTranslate(text) {
-    if (translationCache.has(cacheKey(text))) return;
+    if (pickTr(text)) return;
     domQueue.add(text);
     if (domQueueTimer) return;
-    domQueueTimer = setTimeout(() => {
+    domQueueTimer = setTimeout(async () => {
       domQueueTimer = null;
       const chunk = Array.from(domQueue);
       domQueue.clear();
       if (!chunk.length || !domMode || !config.enabled) return;
-      runChunk(chunk, loadToken);
+      const token = loadToken;
+      // 实时模式同样先 Google 秒出、再 AI 升级
+      await runChunk(chunk, token, "google");
+      if (isHybrid()) await runChunk(chunk, token, "ai");
     }, 400);
   }
 
@@ -1975,6 +2144,8 @@
     if (needRender) {
       lastIndex = idx;
       renderCue(idx, false, t);
+      // 当前句没译文不等队列，秒级兜底（Google 先行，AI 随后升级）
+      ensureCurrent(idx, loadToken);
     }
   }
 
@@ -2021,7 +2192,7 @@
     }
     box.style.visibility = "visible";
     const cue = cueList[idx];
-    const tr = translationCache.get(cacheKey(cue.text));
+    const tr = pickTr(cue.text);
 
     // 长句自适应缩字号：**先用整句量高**（高度是这条字幕的固定值，
     // 用整句量才不会随揭示进度抖，也能保证任何时刻都不超限），
@@ -2177,7 +2348,7 @@
   function countTranslated() {
     let n = 0;
     for (const c of cueList) {
-      if (translationCache.has(cacheKey(c.text))) n++;
+      if (pickTr(c.text)) n++;
     }
     return n;
   }
@@ -2209,7 +2380,9 @@
 
   function buildSubtitleContent(format, mode) {
     const bodyOf = (cue) => {
-      const tr = translationCache.get(cacheKey(cue.text));
+      // 混合模式：有 AI 用 AI（高质量），没覆盖到的用 Google 打底，
+      // 都没有才回退原文——导出的完整性由 Google 保底，质量随 AI 覆盖变好。
+      const tr = pickTr(cue.text);
       if (mode === "original") return cue.text;
       if (mode === "translation") return tr || cue.text;
       // 双语：有译文则两行，没有则只显示原文

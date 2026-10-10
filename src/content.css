@@ -51,6 +51,15 @@
   opacity: 1;
 }
 
+/* 拖动把手平时透明、悬停才显示，但字幕层是 pointer-events: none，
+   鼠标事件直接穿透，wrapper:hover 永远触发不了 → 把手永久隐身，
+   用户根本找不到它（这就是"不能拖"的真正原因）。
+   改成播放器悬停就显示：鼠标进画面底部区域就能看到把手。 */
+#movie_player:hover #ytbs-handle,
+.html5-video-player:hover #ytbs-handle {
+  opacity: 1;
+}
+
 #ytbs-download {
   position: absolute;
   top: -10px;

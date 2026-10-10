@@ -230,16 +230,14 @@ function runCli(prompt, model) {
 
     // 字幕翻译必须短平快：
     // --format json          输出可解析的事件流
-    // 禁止任何形式的解释、markdown、备选方案，只��纯译文。
-    // 不加这些约束时实测模型会返回「几个备选 + 建议补充上下文」，
-    // 单句耗时 6~33 秒，字幕根本没法用。
-    const TIGHT_SUFFIX =
-      "\n\n【输出约束·必须严格遵守】" +
-      "1. 只输出译文本身，一句都不要多。\n" +
-      "2. 禁止任何解释、前言、markdown 标题、列表、编号、引号包裹。\n" +
-      "3. 禁止给备选方案，禁止反问，禁止要求补充上下文。\n" +
-      "4. 译文长度不超过原文的 1.2 倍。\n" +
-      "5. 现在直接输出译文，第一个字符就是译文。";
+    // 批量 JSON 翻译与单句翻译的输出约束是互斥的，不能共用同一套后缀：
+    // 用户原提示词同时要求「输出 JSON 数组」和「只输出一句译文」，
+    // 模型会困惑并输出解释+备选，单批耗时 6~33 秒且解析失败。
+    // 这里按是否为批量 JSON 自动选择后缀，保持与上游要求一致。
+    const isBatchJson = /\[[\s\S]*\]/.test(prompt) && /JSON|数组|array/i.test(prompt);
+    const TIGHT_SUFFIX = isBatchJson
+      ? "\n\n只输出JSON数组，首字符必须是[，无解释、无markdown、无备选。"
+      : "\n\n只输出译文一句，无解释、无引号，首字符即译文。";
 
     const args = ["run", "--format", "json", "--model", normalizeModel(model), prompt + TIGHT_SUFFIX];
     // stdin 必须是 ignore：若留成打开的 pipe，CLI 会一直等待 EOF 而卡死。
@@ -294,6 +292,20 @@ function mockTranslate(prompt) {
 async function generate(prompt, model) {
   if (MOCK) return mockTranslate(prompt);
   const raw = await runCli(prompt, model);
+  // 批量 JSON 必须原样返回：cleanSubtitle 是单句清洗器，
+  // 会只取第一行而把 ["a","b"] 切碎，导致上游 JSON 解析失败、
+  // 整批重试退化成逐条（慢 6 倍）。单句才走清洗。
+  const maybeJson = stripFences(raw);
+  if (maybeJson.startsWith("[")) return maybeJson;
+  const m = maybeJson.match(/\[[\s\S]*\]/);
+  if (m && /JSON|数组|array/i.test(prompt)) {
+    try {
+      JSON.parse(m[0]);
+      return m[0];
+    } catch {
+      /* 非合法 JSON，继续走单句清洗 */
+    }
+  }
   return cleanSubtitle(raw);
 }
 
