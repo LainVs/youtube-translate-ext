@@ -29,8 +29,8 @@
     // 样式
     // 字体：只存 key，实际字体栈见 FONT_STACKS
     fontFamily: "common",
-    originalColor: "#39ff6a",
-    translatedColor: "#ffe14d",
+    originalColor: "#00ff66",
+    translatedColor: "#ffd900",
     originalSize: 30,
     translatedSize: 26,
     fontScale: 1,
@@ -194,6 +194,14 @@
       try {
         chrome.storage.sync.get(DEFAULTS, (stored) => {
           config = Object.assign({}, DEFAULTS, stored || {});
+          // 颜色加鲜迁移：只认「恰好是旧默认值」的，没动过手才换；
+          // 用户自己调过的颜色一个字符都不碰。
+          let migrated = false;
+          if (config.originalColor === "#39ff6a") { config.originalColor = "#00ff66"; migrated = true; }
+          if (config.translatedColor === "#ffe14d") { config.translatedColor = "#ffd900"; migrated = true; }
+          if (migrated) {
+            try { chrome.storage.sync.set({ originalColor: config.originalColor, translatedColor: config.translatedColor }); } catch (e) { /* ignore */ }
+          }
           chrome.storage.sync.get(["subtitlePosition"], (r) => {
             position = r && r.subtitlePosition ? r.subtitlePosition : null;
             resolve();

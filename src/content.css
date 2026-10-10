@@ -104,7 +104,7 @@
    这里的值仅作首屏兜底。 */
 .ytbs-original {
   font-weight: 400;
-  opacity: 0.9;
+  opacity: 1;
 }
 
 .ytbs-translated {

@@ -15,8 +15,8 @@ const DEFAULTS = {
   mergeMaxGapMs: 2500,
   revealAsSpoken: true,
   domKeepLatest: true,
-  originalColor: "#39ff6a",
-  translatedColor: "#ffe14d",
+  originalColor: "#00ff66",
+  translatedColor: "#ffd900",
   originalSize: 30,
   translatedSize: 26,
   fontScale: 1,
@@ -39,8 +39,8 @@ const AI_MODEL_CUSTOM = "custom";
 const COMMON_COLORS = [
   "#ffffff",
   "#000000",
-  "#39ff6a",
-  "#ffe14d",
+  "#00ff66",
+  "#ffd900",
   "#7fe3ff",
   "#ffa62b",
   "#ff6b6b",
@@ -96,6 +96,14 @@ async function init() {
     $("aiModelCustom").value = stored.aiModel || "";
   }
   updateModelCustomVisibility();
+
+  // 颜色加鲜迁移（与 content.js loadConfig 同规则）：只认旧默认值
+  if (stored.originalColor === "#39ff6a" || stored.translatedColor === "#ffe14d") {
+    const patch = {};
+    if (stored.originalColor === "#39ff6a") { patch.originalColor = "#00ff66"; $("originalColor").value = "#00ff66"; }
+    if (stored.translatedColor === "#ffe14d") { patch.translatedColor = "#ffd900"; $("translatedColor").value = "#ffd900"; }
+    save(patch);
+  }
 
   renderSwatches();
   syncSwatches();
