@@ -77,6 +77,11 @@
   line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
+  /* 断行美观：优先 balance（各行长度接近，字幕块更方正），
+     不支持的浏览器退回 pretty（避免最后一行只剩一个单词）。
+     分句合并后单条字幕常常折 2~3 行，这个差别很明显。 */
+  text-wrap: pretty;
+  text-wrap: balance;
   /* 实际字体由 content.js 的 fontFamily 覆盖（见 FONT_STACKS）。
      这里的值只是首屏兜底，且刻意不包含 "YouTube Sans"——
      它没有中文字形，会让中英两行看起来是两种字体。 */

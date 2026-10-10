@@ -94,6 +94,10 @@
   let lastIndex = -1;
   // 逐字揭示用：记录上一帧显示到第几个字符，避免无谓重排
   let lastRevealCount = -1;
+  // 长句自动缩字号：记录是为哪条字幕量的高，避免每帧重排
+  let fitScale = 1;
+  let fitForIdx = -1;
+  let fitHadTr = false;
   let syncTimer = null;
   let adTimer = null;
   let isAdPlaying = false;
@@ -549,26 +553,64 @@
 
   /**
  * 在一段已攒好的文本里找出「内部句末标点」的位置。
- * 返回该标点之后、剩余内容之前的字符下标；没有内部断点返回 -1。
+ * 返回断点之后**下一个词的起始下标**；没有可断点返回 -1。
  *
  * 例："And you were struggling, too. It was really hard."
- *     -> 返回 "too." 之后的下标，也就是 " It was really hard." 的起点。
+ *     -> 返回 "It" 的下标（已跳过中间的空格）
  *
  * 用途见 mergeCuesToSentences 里的兜底收口：
  * 防止两条都以句号结尾的碎片被粘成一句。
  */
   function findInnerSentenceEnd(text) {
     const t = String(text || "");
+    if (!t) return -1;
     const re = /[.!?…。！？]["'”’)\]】》」』]*(\s+\S)/g;
-    let cut = -1;
+    const hits = [];
     let m;
     while ((m = re.exec(t)) !== null) {
-      cut = m.index + m[0].length - m[1].length;
+      hits.push({ punct: m.index, cut: m.index + m[0].length - m[1].length });
     }
-    if (cut < 0) return -1;
-    const tail = t.slice(cut).replace(/^["'”’)\]】》」』]*\s*/, "");
-    if (!tail) return -1;
-    return t.length - tail.length;
+    if (!hits.length) return -1;
+
+    // 从最后一个断点往前找，选第一个「真句末」。
+    // 从后往前是必要的：只取最后一个的话，
+    //   "He left. Then see Mr. Smith"
+    // 的最后一个句点在 "Mr." 后面，会被缩写规则挡掉，
+    // 于是前面那个合法的 "left." 断点也一起丢了。
+    for (let k = hits.length - 1; k >= 0; k--) {
+      if (t.charAt(hits[k].punct) === "." && isAbbreviationBefore(t.slice(0, hits[k].punct))) {
+        continue; // "Mr." / "p.m." / "J." 这类不是句末
+      }
+      // cut 目前紧贴句末标点，往后跳过空白，让 tail 从**词首**开始。
+      // 否则 splitBuf 切出来的 tail 会带前导空格，
+      // 叠加后续的 " " + piece 连接后就出现双空格，译文里可能变成断词。
+      let cut = hits[k].cut;
+      while (/\s/.test(t.charAt(cut))) cut++;
+      if (!t.slice(cut).trim()) continue;
+      return cut;
+    }
+    return -1;
+  }
+
+  /**
+   * 判断句点前的那个词是不是缩写 —— 它后面的点不能当句末标点。
+   *
+   * 实测会被误切的写法：
+   *   "Mr. Smith went home."    -> 断成 "Mr." + "Smith went home."
+   *   "She left at 5 p.m. yesterday." -> 断成 "…p.m." + "yesterday."
+   *   "J. Smith arrived."       -> 断成 "J." + "Smith arrived."
+   * 小数 "28.5" 天然安全（句点后没有空格，正则匹配不到）。
+   */
+  const ABBREVIATIONS =
+    /^(?:mr|mrs|ms|dr|prof|rev|hon|gen|col|capt|cmdr|lt|sgt|jr|sr|st|mt|vs|etc|no|vol|fig|dept|est|inc|ltd|co|corp|approx|min|max|ca|cf|al|jd|phd|md|ba|ma|bs|am|pm|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)$/i;
+
+  function isAbbreviationBefore(s) {
+    // s = 句点之前的内容（不含句点），取最后一个词
+    const tok = (String(s || "").match(/[A-Za-z.]+$/) || [""])[0];
+    if (!tok) return false;
+    if (tok.length === 1) return true; // J. K. 这类首字母
+    if (tok.indexOf(".") >= 0) return true; // e.g. i.e. p.m. u.s.
+    return ABBREVIATIONS.test(tok);
   }
 
   /**
@@ -693,7 +735,7 @@
         const gap = c.start - buf.end;
         const tooLong = (buf.text + " " + piece).length > maxChars;
 
-        // 上一句还没收尾（有句末标点）时，间隔阈值放宽到 4 秒。
+        // 上一句还没收尾（没有句末标点）时，间隔阈值放宽到 8 秒。
         // 原因：人说话的自然换气经常超过 1.2 秒，原来的 maxGapMs=1200
         // 太激进，会把一句完整的话从中间切断。
         const prevOpen = !endsSentence(buf.text);
@@ -736,30 +778,18 @@
       //
       // 修复的实际案例（用户截图）：ASR 把
       //   "And you were struggling, too." + "It was really hard."
-      // 切成两条，两条都以句号结尾。旧逻辑只在「当前这条」是残句时
-      // 才收口，于是两条都被判成完整句（都不收口），
+      // 切成两条，第一条是完整句却不收口（被残句规则挡住），
       // 结果粘成 "And you were struggling, too. It was really hard."。
       //
-      // 现在追加前先检查 buf 内部有没有可断的点。
-      const splitAt = findInnerSentenceEnd(buf.text);
-      if (splitAt > 0) {
-        const head = buf.text.slice(0, splitAt).trim();
-        const tail = buf.text.slice(splitAt).trim();
-        // 头部自成一句，单独收口；剩余部分作为新 buf 继续攒
-        buf.text = head;
-        buf.end = Math.max(buf.start, splitAt);
-        buf.dur = buf.end - buf.start;
-        flush();
-        if (tail) {
-          buf = {
-            start: c.start,
-            end: c.end,
-            dur: c.dur,
-            text: tail,
-            parts: [{ startChar: 0, endChar: tail.length, start: c.start, end: c.end }],
-          };
-        }
-        continue;
+      // 这里必须走 splitBuf —— 直接改 buf.end 是上一版的 bug：
+      //   buf.end = Math.max(buf.start, splitAt)   // splitAt 是字符下标！
+      // 毫秒和字符混用，结果 end 恒等于 start，
+      // 而 findCue 要求 t 落在 [start,end] 内，于是头部那句**永远不显示**。
+      if (findInnerSentenceEnd(buf.text) > 0) {
+        const pieces = splitAll(buf);
+        // 前 n-1 段都是完整句，直接收口；最后一段继续攒
+        for (let k = 0; k < pieces.length - 1; k++) out.push(pieces[k]);
+        buf = pieces[pieces.length - 1];
       }
 
       // 拼到句末标点就收口；但如果这条本身是残句（I did.），
@@ -768,6 +798,113 @@
     }
     flush();
     return out;
+  }
+
+  /**
+   * 把一条已攒好的 cue 从字符下标 cut 处拆成 head / tail 两段，
+   * **同时按字符比例把时间轴和 parts[] 一起切开**。
+   *
+   * 这是上一版 bug 的正解：拆文本时必须连带拆时间，
+   * 否则 head.end 要么退化成 start（字幕不显示），
+   * 要么被算成 tail 的时间（头部整段被跳过）。
+   *
+   * 一段 part 横跨断点时（说明切在了某个 cue 内部），
+   * 按字符比例插值出边界时间，这样 head 和 tail 严丝合缝、不重不漏。
+   */
+  function splitBuf(buf, cut) {
+    const t = buf.text;
+    const headText = t.slice(0, cut).trimEnd();
+    const tailText = t.slice(cut);
+    if (!headText || !tailText.trim()) return null;
+
+    const parts =
+      buf.parts && buf.parts.length
+        ? buf.parts
+        : [{ startChar: 0, endChar: t.length, start: buf.start, end: buf.end }];
+
+    const headParts = [];
+    const tailParts = [];
+    let headEnd = buf.start;
+    let tailStart = buf.end;
+
+    for (const p of parts) {
+      const s = p.startChar;
+      const e = p.endChar;
+      if (e <= cut) {
+        headParts.push({ startChar: s, endChar: Math.min(e, headText.length), start: p.start, end: p.end });
+        headEnd = Math.max(headEnd, p.end);
+      } else if (s >= cut) {
+        tailParts.push({ startChar: s - cut, endChar: e - cut, start: p.start, end: p.end });
+        tailStart = Math.min(tailStart, p.start);
+      } else {
+        // 横跨断点：按字符占比把这一片的时间劈开
+        const frac = e > s ? (cut - s) / (e - s) : 0;
+        const b = Math.round(p.start + (p.end - p.start) * frac);
+        headParts.push({ startChar: s, endChar: headText.length, start: p.start, end: b });
+        tailParts.push({ startChar: 0, endChar: Math.max(0, e - cut), start: b, end: p.end });
+        headEnd = Math.max(headEnd, b);
+        tailStart = Math.min(tailStart, b);
+      }
+    }
+
+    // parts 覆盖不全时的兜底：保证 head/tail 都有可用的时间与偏移
+    if (!headParts.length) {
+      headEnd = buf.start;
+      headParts.push({ startChar: 0, endChar: headText.length, start: buf.start, end: headEnd });
+    }
+    if (!tailParts.length) {
+      tailStart = buf.end;
+      tailParts.push({ startChar: 0, endChar: tailText.length, start: tailStart, end: buf.end });
+    }
+
+    // 关键 1：head.end 必须严格大于 head.start，
+    // 否则 findCue 的 [start,end] 区间是空集，这条字幕永远选不中。
+    const headEndFinal = Math.max(headEnd, buf.start + 300);
+    // 关键 2：tail.start 必须不早于 head.end。
+    // 两条 start 相同时（整条 cue 被从中间劈开就是这种情况），
+    // findCue 的二分会优先返回**下标更大**的那条，head 就永远轮不到显示。
+    const tailStartFinal = Math.max(tailStart, headEndFinal);
+    const tailEndFinal = Math.max(buf.end, tailStartFinal + 300);
+    const head = {
+      start: buf.start,
+      end: headEndFinal,
+      dur: headEndFinal - buf.start,
+      text: headText,
+      parts: headParts,
+    };
+    const tail = {
+      start: tailStartFinal,
+      end: tailEndFinal,
+      dur: tailEndFinal - tailStartFinal,
+      text: tailText,
+      parts: tailParts,
+    };
+    return { head, tail };
+  }
+
+  /** 递归把一条 cue 里所有内部句末断点都切开（一次只能切最后一个） */
+  function splitAll(buf) {
+    const queue = [buf];
+    const done = [];
+    let guard = 0;
+    while (queue.length && guard++ < 64) {
+      const cur = queue.shift();
+      if (findInnerSentenceEnd(cur.text) <= 0) {
+        done.push(cur);
+        continue;
+      }
+      const sp = splitBuf(cur, findInnerSentenceEnd(cur.text));
+      if (!sp) {
+        done.push(cur);
+        continue;
+      }
+      // head 在前、tail 在后，保证输出顺序
+      queue.unshift(sp.tail);
+      queue.unshift(sp.head);
+    }
+    // 守卫触发时把剩余的段全部补上 —— 丢一段就是丢一段字幕
+    while (queue.length) done.push(queue.shift());
+    return done.length ? done : [buf];
   }
 
   /**
@@ -802,16 +939,52 @@
     return reached;
   }
 
+  /**
+   * 把 n 处的切点回退到词边界，避免译文/原文被劈成两半：
+   *   "imagin" + "两个人..."  ->  "imagine" + "两个人..."
+   * 中文没有词间空格，逐字切是正常的，原样返回。
+   */
+  function cutAtWord(text, n) {
+    const s = String(text || "");
+    if (n >= s.length) return s;
+    if (n <= 0) return "";
+    const before = s.charAt(n - 1);
+    const at = s.charAt(n);
+    // 只有「切进了拉丁词中间」才需要回退
+    if (!/[A-Za-z0-9]/.test(before) || !/[A-Za-z0-9]/.test(at)) return s.slice(0, n);
+    let i = n;
+    while (i > 0 && /[A-Za-z0-9'’-]/.test(s.charAt(i - 1))) i--;
+    // 退太多（整个长词占了切点前一大半）就不退了，宁可切在词里
+    if (i <= 0 || i < n * 0.5) return s.slice(0, n);
+    return s.slice(0, i);
+  }
+
+  /**
+   * 「这句话还没说完」的视觉标记。
+   *
+   * 分句合并后，一条字幕里常有好几句，逐小句揭示时中间态必须有提示，
+   * 否则读者会以为句子到此结束了（"We were struggling," 看着像结尾）。
+   * 竞品给的正是这个省略号语感。
+   *
+   * 已经落在句末标点上时不加 —— 那说明这一句确实说完了。
+   */
+  function incompleteMark(s) {
+    const t = String(s || "").replace(/\s+$/, "").replace(/[,，、;；:：]+$/, "");
+    if (!t) return t;
+    if (/[.!?…。！？]["'”’)\]】》」』]*$/.test(t)) return t;
+    return t + "…";
+  }
+
   /** 把整句译文按比例切成对应长度的片段，用于「贴合语音」地显示 */
   function sliceByRatio(text, ratio) {
     const s = String(text || "");
     if (!s) return "";
     if (ratio >= 1) return s;
     const n = Math.max(1, Math.round(s.length * ratio));
-    let cut = s.slice(0, n);
+    let cut = cutAtWord(s, n);
     const m = cut.match(/[，,、。.!?！？；;：:]\s*$/);
     if (m) cut = cut.slice(0, cut.length - m[0].length);
-    if (cut.length < 2 && s.length > 2) cut = s.slice(0, Math.min(s.length, 4));
+    if (cut.length < 2 && s.length > 2) cut = cutAtWord(s, Math.min(s.length, 4));
     return cut.trim() || s.slice(0, n);
   }
 
@@ -847,7 +1020,13 @@
 
   function stripNonSpeech(text) {
     if (!text) return "";
-    let out = String(text).replace(NON_SPEECH_RE, "");
+    let out = String(text);
+    // ASR 滚动字幕用 ">>" 标记「新增内容的起点」，
+    // 例如 "I didn't understand it then, but >> [music] >> and now I do"
+    // 这个标记不是台词，原文会显示成裸的 ">>"，译文里也可能被翻出来。
+    // 这里直接去掉（保留它前后的文字）。
+    out = out.replace(/\s*>>\s*/g, " ");
+    out = out.replace(NON_SPEECH_RE, "");
     // 还有一种写法是直接裸写不带括号：Music / Applause / 笑声
     // 只在整条就是这些词时删，避免误伤正常句子里的 "music"。
     // 清理过滤后残留的孤立括号，如 "()"、"[]"
@@ -909,7 +1088,9 @@
 
     // 合并成完整句：这是翻译质量的关键。
     // 关掉时退回「一条碎片一条字幕」，方便对比和排查。
-    const maxChars = config.mergeMaxChars || 2500;
+    // 160 是默认值，不能写 2500 —— 一旦 config.mergeMaxChars 未设置，
+    // 2500 意味着几乎永不切分，长段落会攒成一坨。
+    const maxChars = config.mergeMaxChars || 160;
     const maxGapMs = config.mergeMaxGapMs || 2500;
 
     // bySentence 只在明确为 false 时才关闭。
@@ -1300,17 +1481,72 @@
     return 400; // 其余（含 500/600）一律 Regular，避开合成加粗
   }
 
+  /**
+   * 字号 = 配置字号 × 全局缩放 × 长句自适应缩放。
+   * 单独抽出来是因为 fitTextToBox() 要反复调它试算高度。
+   */
+  function applyFontSizes(scale) {
+    const k = (config.fontScale || 1) * (scale > 0 ? scale : 1);
+    if (originalEl) originalEl.style.fontSize = Math.round((config.originalSize || 18) * k) + "px";
+    if (translatedEl) translatedEl.style.fontSize = Math.round((config.translatedSize || 24) * k) + "px";
+  }
+
+  /**
+   * 长句自动缩字号。
+   *
+   * 分句合并后单条字幕最长能到 160 个英文字符 + 对应译文，
+   * 在小窗口里会折成 5~6 行，字幕框从底部往上顶，盖掉小半块画面
+   * （字幕是 bottom 定位的，只会往上长，不会被裁掉）。
+   *
+   * 做法是**先用整句量高再缩**，而不是等揭示到一半再缩：
+   *   - 整句高度是这条字幕的固定值 -> 量一次即可，不会随揭示进度抖动
+   *   - 用整句算出的缩放能保证**任何时刻都不超限**
+   *
+   * 高度与字号近似成平方关系（字号变大 -> 每行字数变少 -> 行数变多），
+   * 所以用 sqrt 迭代，2~3 轮就能收敛。
+   * 缩放下限 0.6，再小就不如让它高一点了。
+   */
+  function fitTextToBox() {
+    if (!box || !playerEl || !originalEl || !translatedEl) return -1;
+    const ph = playerEl.clientHeight || 0;
+    if (!ph) return -1;
+    const maxH = Math.max(100, Math.round(ph * 0.42));
+    const pad = (isFinite(Number(config.boxPadding)) ? Number(config.boxPadding) : 10) * 2;
+    // 只量**两行字幕本身**，不要用 box.offsetHeight：
+    //   - #ytbs-status 的「翻译中… 0/N」也在 box 里，量进去会多缩一截，
+    //     而 status 很快就消失了，字号却不会自己变回来
+    //   - 广告期间 box 是 display:none，两行都是 0，这时去量会记下错误基准
+    const LINE_GAP = 4; // 与 content.css 的 gap 保持一致
+    const lineH = () => originalEl.offsetHeight + translatedEl.offsetHeight + LINE_GAP;
+    if (!lineH()) return -1;
+    let scale = fitScale;
+
+    for (let i = 0; i < 5; i++) {
+      applyFontSizes(scale);
+      // 强制回流拿真实高度。renderCue 每换一条字幕才走一次，开销可接受。
+      const h = lineH();
+      const avail = maxH - pad;
+      if (h <= avail || scale <= 0.6) break;
+      const ratio = Math.sqrt(Math.max(0.15, avail / Math.max(1, h)));
+      scale = Math.max(0.6, scale * ratio);
+    }
+    applyFontSizes(scale);
+    fitScale = scale;
+    return scale;
+  }
+
   function applyStyles() {
     if (!box) return;
-    const s = config.fontScale || 1;
+    // 设置变了 -> 量高基准作废，下一条字幕重新算
+    fitScale = 1;
+    fitForIdx = -1;
+    applyFontSizes(1);
     if (originalEl) {
       originalEl.style.color = config.originalColor;
-      originalEl.style.fontSize = Math.round((config.originalSize || 18) * s) + "px";
       originalEl.style.fontWeight = fixCJKWeight(config.originalWeight);
     }
     if (translatedEl) {
       translatedEl.style.color = config.translatedColor;
-      translatedEl.style.fontSize = Math.round((config.translatedSize || 24) * s) + "px";
       translatedEl.style.fontWeight = fixCJKWeight(config.translatedWeight);
     }
     if (originalEl) originalEl.style.display = config.bilingual ? "" : "none";
@@ -1618,6 +1854,27 @@
     }
     box.style.visibility = "visible";
     const cue = cueList[idx];
+    const tr = translationCache.get(cacheKey(cue.text));
+
+    // 长句自适应缩字号：**先用整句量高**（高度是这条字幕的固定值，
+    // 用整句量才不会随揭示进度抖，也能保证任何时刻都不超限），
+    // 量完再切成揭示态。
+    // 译文从无到有会改变高度，所以它也算一个重算触发条件。
+    const hadTr = !!tr;
+    const cueChanged = idx !== fitForIdx;
+    if (cueChanged || hadTr !== fitHadTr) {
+      // 换字幕必须从 1.0 重新量 —— 否则上一句缩到 0.6 后，
+      // 后面所有短句都会跟着变小。
+      if (cueChanged) fitScale = 1;
+      originalEl.textContent = cue.text;
+      translatedEl.textContent = tr || "…";
+      // 量不到真实高度（还没布局 / 被隐藏）就**不记录**，
+      // 让下一次渲染重新量，避免把错误的基准固化下来。
+      if (fitTextToBox() >= 0) {
+        fitForIdx = idx;
+        fitHadTr = hadTr;
+      }
+    }
 
     // 逐字揭示：只显示"人已经说到"的部分。
     // 翻译仍然是对整句做的（缓存 key 是整句 text），
@@ -1631,17 +1888,19 @@
       lastRevealCount = spoken;
     }
 
+    // 切点先对齐词边界（避免 "imagin" 这种劈半的词），
+    // 再补省略号表示「这句话还没说完」——
+    // 分句合并后一条字幕里常有好几句，没有省略号读者会以为句子结束了。
     if (config.revealAsSpoken && showRatio < 1) {
-      originalEl.textContent = cue.text.slice(0, Math.max(1, spoken));
+      originalEl.textContent = incompleteMark(cutAtWord(cue.text, Math.max(1, spoken)));
     } else {
       originalEl.textContent = cue.text;
     }
 
-    const tr = translationCache.get(cacheKey(cue.text));
     if (!tr) {
       translatedEl.textContent = "…";
     } else if (config.revealAsSpoken && showRatio < 1) {
-      translatedEl.textContent = sliceByRatio(tr, showRatio);
+      translatedEl.textContent = incompleteMark(sliceByRatio(tr, showRatio));
     } else {
       translatedEl.textContent = tr;
     }
