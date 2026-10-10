@@ -595,8 +595,10 @@
 
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];
-      const piece = c.text.trim();
-      if (!piece) continue; // 纯空白的占位 cue（ASR 里很常见）直接丢
+      // 过滤 [Music]/[音乐]/[Applause] 这类非语音标记，
+      // 过滤后变成空的碎片直接丢（例如整条只有 "[Music]"）。
+      const piece = stripNonSpeech(c.text);
+      if (!piece) continue; // 纯空白或纯音乐标记
 
       if (!buf) {
         startNew(c, piece);
@@ -633,31 +635,35 @@
   }
 
   /**
-   * 按当前播放位置算出「这句话已经说到哪」。
-   * 返回已说出的字符数；整句说完时返回全长。
+   * 按当前播放位置算出「已经显示到第几个小句」。
    *
-   * 依据 parts[] 里的碎片时间轴 —— 那是从真实 ASR 字幕来的，
+   * 粒度是**小句**（ASR 碎片），不是单字：
+   * 一句话常常是 "Back when we were kids," + "we'd be at recess" +
+   * "and I'd look over at you" + ... 这样一串短句拼起来的。
+   * 显示时按小句整段推进，读起来才是一句一句，而不是一个字一个字蹦。
+   *
+   * 依据 parts[] 里的碎片时间轴 —— 来自真实 ASR 字幕，
    * 比按字数平均分配准得多。
+   *
+   * @returns {number} 已说出的字符数（对齐到小句边界）
    */
   function spokenCharCount(cue, t) {
     if (!cue) return 0;
     const total = cue.text.length;
-    if (!cue.parts || !cue.parts.length) return total;
+    const parts = cue.parts;
+    if (!parts || !parts.length) return total;
     if (t >= cue.end) return total;
     if (t < cue.start) return 0;
 
-    for (let i = 0; i < cue.parts.length; i++) {
-      const p = cue.parts[i];
-      if (t < p.start) return i > 0 ? cue.parts[i - 1].endChar : 0;
-      if (t <= p.end) {
-        // 正在这一片的中间：按时间比例推进到片尾
-        const span = p.end - p.start;
-        const ratio = span > 0 ? (t - p.start) / span : 1;
-        const width = p.endChar - p.startChar;
-        return p.startChar + Math.round(width * Math.max(0, Math.min(1, ratio)));
-      }
+    // 小句一旦开始就整段显示（字幕惯例：不等说完再亮）
+    // 这样每片平均 2~3 秒，视觉上是「一句一句」推进。
+    let reached = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (t >= p.start) reached = p.endChar;
+      else break;
     }
-    return total;
+    return reached;
   }
 
   /** 把整句译文按比例切成对应长度的片段，用于「贴合语音」地显示 */
@@ -665,14 +671,60 @@
     const s = String(text || "");
     if (!s) return "";
     if (ratio >= 1) return s;
-    // 不切在标点后面，避免出现半个词
     const n = Math.max(1, Math.round(s.length * ratio));
     let cut = s.slice(0, n);
     const m = cut.match(/[，,、。.!?！？；;：:]\s*$/);
     if (m) cut = cut.slice(0, cut.length - m[0].length);
-    // 切太短就多给几个字，避免只剩一两个字
     if (cut.length < 2 && s.length > 2) cut = s.slice(0, Math.min(s.length, 4));
     return cut.trim() || s.slice(0, n);
+  }
+
+  /**
+   * 过滤掉非语音的听觉提示标记。
+   *
+   * YouTube 的 ASR 字幕里会夹带这类标签：
+   *   [Music]  [音乐]  [Applause]  [Laughter]  [无声]
+   *   (upbeat music)  (background music)
+   * 它们不是台词，翻译出来是「[音乐]」，显示出来纯属噪音。
+   * 实测一集视频里能遇到几十处，直接过滤掉。
+   *
+   * 只删这些已知的声音/画面提示，不动正常台词里的括号（如 "(pause)"）。
+   */
+  // 用两段拼出来，是因为 "upbeat music" / "background music" 这类
+  // 带形容词的写法，单个 \s* 连不起来。
+  const NON_SPEECH_RE = new RegExp(
+    "[\\[（(]\\s*(?:" +
+      "(?:upbeat|background|soft|loud|tense|up|tempo)?\\s*\\**\\s*music|" +
+      "musical|sound\\s*track|bgm|" +
+      "applause|applauding|clapping|clap|" +
+      "laughter|laughing|laugh|chuckle|" +
+      "cheering|cheer|audience|" +
+      "silence|inaudible|unintelligible|muffled|" +
+      "no\\s*speech|ambient\\s*(?:noise|sound)|crowd\\s*(?:noise|chatter|roar)|" +
+      "gunshot|door\\s*slam|noise|" +
+      "声音|音乐|纯音乐|背景音乐|" +
+      "掌声|掌声雷动|笑声|笑声不断|欢呼|欢呼声|" +
+      "寂静|无声|安静|听不清|模糊不清|噪音|人声嘈杂" +
+    ")\\s*[\\]）)]",
+    "gi"
+  );
+
+  function stripNonSpeech(text) {
+    if (!text) return "";
+    let out = String(text).replace(NON_SPEECH_RE, "");
+    // 还有一种写法是直接裸写不带括号：Music / Applause / 笑声
+    // 只在整条就是这些词时删，避免误伤正常句子里的 "music"。
+    // 清理过滤后残留的孤立括号，如 "()"、"[]"
+    out = out.replace(/[\[\(（]\s*[\]\)）]/g, "");
+    // 清理因删除留下的多余空格（连续两个以上）
+    out = out.replace(/\s{2,}/g, " ").trim();
+    // 清理悬空的标点，如 "，" 开头或 " ，"
+    // 只清「删除标记后遗留在边界」的标点：
+    // 行首的逗号顿号，以及行尾的逗号顿号。
+    // 行尾的句号/问号/叹号要留着 —— 那是字幕的结束标记，
+    // 删了会让 endsSentence 失效，进而把整段话错误地并成一句。
+    out = out.replace(/^[,，、;；]\s*/, "").replace(/[ \t]+[,，、;；]+$/, "");
+    return out.trim();
   }
 
   /**
