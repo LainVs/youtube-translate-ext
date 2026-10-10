@@ -54,6 +54,9 @@
     mergeBySentence: true,
     mergeMaxChars: 160,
     mergeMaxGapMs: 1200,
+    // 逐字揭示：整句送翻译（保证质量），但只显示"人已经说到"的部分。
+    // 关掉就是整句一次性显示。
+    revealAsSpoken: true,
     // DOM 实时模式：只显示 ASR 滚动字幕里"最后一个 >> 之后"的新内容，
     // 否则会把整条滚动历史（可能上百字符）连同 >> 标记一起显示出来。
     domKeepLatest: true,
@@ -85,6 +88,8 @@
   let statusEl = null;
 
   let lastIndex = -1;
+  // 逐字揭示用：记录上一帧显示到第几个字符，避免无谓重排
+  let lastRevealCount = -1;
   let syncTimer = null;
   let adTimer = null;
   let isAdPlaying = false;
@@ -562,7 +567,16 @@
     return false;
   }
 
-  /** 拼接碎片：一直拼到句末标点，或达到长度/时间上限 */
+  /**
+   * 拼接碎片成完整句，但**同时保留每个碎片在整句里的字符偏移与时间**。
+   *
+   * 这是「翻译用整句、显示用切片」的基础：
+   *   - text是整句 -> 送去翻译，质量有保证（不会断头断尾）
+   *   - parts[]   -> 播放时按当前时间算出「已经说到哪」，只显示到那
+   *
+   * 不保留 parts 的话，合并后就只剩一条从 0ms 持续到 13s 的长字幕，
+   * 开口第一个字整句就全显示出来了（这正是上一版的毛病）。
+   */
   function mergeCuesToSentences(cues, maxChars, maxGapMs) {
     const out = [];
     let buf = null;
@@ -572,29 +586,40 @@
       buf = null;
     };
 
+    const startNew = (c, piece) => {
+      buf = {
+        start: c.start, end: c.end, dur: c.dur, text: piece,
+        parts: [{ startChar: 0, endChar: piece.length, start: c.start, end: c.end }],
+      };
+    };
+
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];
       const piece = c.text.trim();
       if (!piece) continue; // 纯空白的占位 cue（ASR 里很常见）直接丢
 
       if (!buf) {
-        buf = { start: c.start, end: c.end, dur: c.dur, text: piece };
+        startNew(c, piece);
       } else {
         // 间隔过大（> maxGapMs）视为另一段话，不硬拼
         const gap = c.start - buf.end;
         const tooFar = gap > maxGapMs;
         const tooLong = (buf.text + " " + piece).length > maxChars;
 
-        if (tooFar) {
-          // 时间跳跃处断开：先把已攒的句子收口，再以当前句另起
+        if (tooFar || tooLong) {
+          // 先收口已有内容，当前句另起（保持顺序，不丢字）
           flush();
-          buf = { start: c.start, end: c.end, dur: c.dur, text: piece };
-        } else if (tooLong) {
-          // 超长才切：先收口已有内容，当前句另起（保持顺序，不丢字）
-          flush();
-          buf = { start: c.start, end: c.end, dur: c.dur, text: piece };
+          startNew(c, piece);
         } else {
+          // 追加前先记下偏移：分隔符是 1 个空格
+          const startChar = buf.text.length + 1;
           buf.text = buf.text + " " + piece;
+          buf.parts.push({
+            startChar: startChar,
+            endChar: buf.text.length,
+            start: c.start,
+            end: c.end,
+          });
           buf.end = Math.max(buf.end, c.end);
           buf.dur = buf.end - buf.start;
         }
@@ -605,6 +630,49 @@
     }
     flush();
     return out;
+  }
+
+  /**
+   * 按当前播放位置算出「这句话已经说到哪」。
+   * 返回已说出的字符数；整句说完时返回全长。
+   *
+   * 依据 parts[] 里的碎片时间轴 —— 那是从真实 ASR 字幕来的，
+   * 比按字数平均分配准得多。
+   */
+  function spokenCharCount(cue, t) {
+    if (!cue) return 0;
+    const total = cue.text.length;
+    if (!cue.parts || !cue.parts.length) return total;
+    if (t >= cue.end) return total;
+    if (t < cue.start) return 0;
+
+    for (let i = 0; i < cue.parts.length; i++) {
+      const p = cue.parts[i];
+      if (t < p.start) return i > 0 ? cue.parts[i - 1].endChar : 0;
+      if (t <= p.end) {
+        // 正在这一片的中间：按时间比例推进到片尾
+        const span = p.end - p.start;
+        const ratio = span > 0 ? (t - p.start) / span : 1;
+        const width = p.endChar - p.startChar;
+        return p.startChar + Math.round(width * Math.max(0, Math.min(1, ratio)));
+      }
+    }
+    return total;
+  }
+
+  /** 把整句译文按比例切成对应长度的片段，用于「贴合语音」地显示 */
+  function sliceByRatio(text, ratio) {
+    const s = String(text || "");
+    if (!s) return "";
+    if (ratio >= 1) return s;
+    // 不切在标点后面，避免出现半个词
+    const n = Math.max(1, Math.round(s.length * ratio));
+    let cut = s.slice(0, n);
+    const m = cut.match(/[，,、。.!?！？；;：:]\s*$/);
+    if (m) cut = cut.slice(0, cut.length - m[0].length);
+    // 切太短就多给几个字，避免只剩一两个字
+    if (cut.length < 2 && s.length > 2) cut = s.slice(0, Math.min(s.length, 4));
+    return cut.trim() || s.slice(0, n);
   }
 
   /**
@@ -1281,9 +1349,21 @@
     if (!v) return;
     const t = v.currentTime * 1000;
     const idx = findCue(t);
-    if (idx !== lastIndex) {
+
+    // 逐字揭示：同一条字幕内部也要随播放进度刷新，
+    // 否则整句会在开口第一帧就全部显示出来（剧透后面还没说到的内容）。
+    let needRender = idx !== lastIndex;
+    if (!needRender && config.revealAsSpoken && idx >= 0) {
+      const cue = cueList[idx];
+      if (cue && cue.parts && cue.parts.length > 1) {
+        const n = spokenCharCount(cue, t);
+        if (n !== lastRevealCount) needRender = true;
+      }
+    }
+
+    if (needRender) {
       lastIndex = idx;
-      renderCue(idx);
+      renderCue(idx, false, t);
     }
   }
 
@@ -1311,7 +1391,13 @@
     return -1;
   }
 
-  function renderCue(idx, force) {
+  /**
+   * @param idx当前字幕下标
+   * @param force 强制刷新
+   * @param timeMs 当前播放位置（毫秒）。传入时用于逐字揭示计算，
+   *              缺省则取当前时间。
+   */
+  function renderCue(idx, force, timeMs) {
     if (!box || !originalEl || !translatedEl) return;
     if (!config.enabled) return;
 
@@ -1324,10 +1410,33 @@
     }
     box.style.visibility = "visible";
     const cue = cueList[idx];
-    originalEl.textContent = cue.text;
+
+    // 逐字揭示：只显示"人已经说到"的部分。
+    // 翻译仍然是对整句做的（缓存 key 是整句 text），
+    // 只是显示时按比例切开译文，不剧透后面的内容。
+    let showRatio = 1;
+    let spoken = cue.text.length;
+    if (config.revealAsSpoken && cue.parts && cue.parts.length > 1) {
+      const t = typeof timeMs === "number" ? timeMs : nowMs();
+      spoken = spokenCharCount(cue, t);
+      showRatio = cue.text.length > 0 ? spoken / cue.text.length : 1;
+      lastRevealCount = spoken;
+    }
+
+    if (config.revealAsSpoken && showRatio < 1) {
+      originalEl.textContent = cue.text.slice(0, Math.max(1, spoken));
+    } else {
+      originalEl.textContent = cue.text;
+    }
 
     const tr = translationCache.get(cacheKey(cue.text));
-    translatedEl.textContent = tr || "…";
+    if (!tr) {
+      translatedEl.textContent = "…";
+    } else if (config.revealAsSpoken && showRatio < 1) {
+      translatedEl.textContent = sliceByRatio(tr, showRatio);
+    } else {
+      translatedEl.textContent = tr;
+    }
   }
 
   // ============================== 广告检测 ==============================

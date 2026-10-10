@@ -9,7 +9,7 @@
   <body>
     <header>
       <h1>YouTube 双语字幕</h1>
-      <span class="ver">v0.6.0</span>
+      <span class="ver">v0.7.0</span>
     </header>
 
     <div id="fatal" class="fatal" style="display: none"></div>
@@ -32,6 +32,12 @@
           智能合并字幕成完整句
         </span>
         <input type="checkbox" id="mergeBySentence" class="switch" />
+      </label>
+      <label class="row">
+        <span title="翻译仍按整句进行（保证译文通顺），但显示时只显示「人已经说到」的那部分，不提前剧透后面的内容。">
+          逐字跟随语音显示
+        </span>
+        <input type="checkbox" id="revealAsSpoken" class="switch" />
       </label>
       <label class="row">
         <span title="YouTube 的自动字幕是滚动窗口式的，会用 >> 标记新增内容。开启后只显示最后一个 >> 之后的新句子，避免整条滚动历史挤成一长串。">
