@@ -362,7 +362,7 @@
       try {
         const r = await askMain("GET_CUES_VIA_PLAYER", { videoId: videoId, langCode: langCode }, 15000);
         if (r && r.body) {
-          cues = finalizeCues(parseCuesFromBody(r.body));
+          cues = finalizeCues(parseCuesFromBody(r.body), config.mergeBySentence);
           if (cues.length) lastError = ""; // 拿到了就清掉上一步的残留错误
         } else if (r && r.error) {
           lastError = r.error;
@@ -548,6 +548,30 @@
   }
 
   /**
+ * 在一段已攒好的文本里找出「内部句末标点」的位置。
+ * 返回该标点之后、剩余内容之前的字符下标；没有内部断点返回 -1。
+ *
+ * 例："And you were struggling, too. It was really hard."
+ *     -> 返回 "too." 之后的下标，也就是 " It was really hard." 的起点。
+ *
+ * 用途见 mergeCuesToSentences 里的兜底收口：
+ * 防止两条都以句号结尾的碎片被粘成一句。
+ */
+  function findInnerSentenceEnd(text) {
+    const t = String(text || "");
+    const re = /[.!?…。！？]["'”’)\]】》」』]*(\s+\S)/g;
+    let cut = -1;
+    let m;
+    while ((m = re.exec(t)) !== null) {
+      cut = m.index + m[0].length - m[1].length;
+    }
+    if (cut < 0) return -1;
+    const tail = t.slice(cut).replace(/^["'”’)\]】》」』]*\s*/, "");
+    if (!tail) return -1;
+    return t.length - tail.length;
+  }
+
+  /**
    * 判断一条字幕是否是「残句」—— 语法上依附前句、不能独立翻译的片段。
    *
    * 实测踩到的坑：ASR 把
@@ -572,14 +596,33 @@
   function isSentenceFragment(text) {
     const t = String(text || "").trim();
     if (!t) return false;
-    // 超过 8 个词，多半是真句子而不是残句。
-    // "That was a great movie indeed, honestly."（7 词）必须靠下面的
-    // 更严条件排除，所以这个上限只是第一道粗筛。
-    if (t.split(/\s+/).length > 8) return false;
-    if (FRAGMENT_CONNECTED.test(t)) return true;
-    // 主形态：整条几乎就是「代词 + 助动词 (+ 最多两个修饰词)」。
-    // 用词数严格卡住，避免 "It is what it is, you know." 被误判。
+
+    // ⚠️ 有句末标点不代表是完整句，得先看它是不是只有「代词+助动词」。
+    //
+    // "And you were struggling, too." 带句号，但你 were 后面还有宾语，
+    // 是完整句 -> 不能当残句，否则不会收口，会把下一句拖进来粘在一起。
+    //
+    // "I did." 同样带句号，但整条只有代词+助动词，没有主语也没有宾语，
+    // 语法上依附前句 -> 必须当残句接回去，
+    // 否则 "…before I did." 会被切成两句，did 译成「我做了」。
+    //
+    // 所以判据是「去掉句末标点后，是否只剩代词+助动词」。
+    const bare = t.replace(/[.!?…。！？]+$/, "").trim();
+    // "只有代词+助动词"才算残句；只要后面还跟着别的成分
+    // （宾语/表语/状语…）就是完整句。
+    // "I did." 去掉句号后是 "I did" -> 纯残句
+    // "And you were struggling, too." 去掉句号后还有 4 个词 -> 完整句
+    const bareWords = bare.split(/\s+/).filter(Boolean);
+    const onlyPronounAux =
+      bareWords.length <= 3 &&
+      (FRAGMENT_STARTERS.test(bare) || FRAGMENT_CONNECTED.test(bare));
+    if (endsSentence(t) && !onlyPronounAux) return false;
+
     const words = t.replace(/[.!?]+$/, "").split(/\s+/).filter(Boolean);
+    // 超过 8 个词，多半是真句子而不是残句
+    if (words.length > 8) return false;
+    if (FRAGMENT_CONNECTED.test(t)) return true;
+    // 主形态：整条几乎就是「代词 + 助动词 (+ 最多两个修饰词)」
     if (words.length <= 3 && FRAGMENT_STARTERS.test(t)) return true;
     // 以逗号/顿号结尾的短插入语
     if (/[,，、]$/.test(t) && words.length <= 6) return true;
@@ -688,6 +731,37 @@
         }
       }
 
+      // 兜底收口：buf 里如果已经出现了「句末标点 + 后面还有内容」，
+      // 说明前面的碎片已经自成一句，必须在那个句号处断开。
+      //
+      // 修复的实际案例（用户截图）：ASR 把
+      //   "And you were struggling, too." + "It was really hard."
+      // 切成两条，两条都以句号结尾。旧逻辑只在「当前这条」是残句时
+      // 才收口，于是两条都被判成完整句（都不收口），
+      // 结果粘成 "And you were struggling, too. It was really hard."。
+      //
+      // 现在追加前先检查 buf 内部有没有可断的点。
+      const splitAt = findInnerSentenceEnd(buf.text);
+      if (splitAt > 0) {
+        const head = buf.text.slice(0, splitAt).trim();
+        const tail = buf.text.slice(splitAt).trim();
+        // 头部自成一句，单独收口；剩余部分作为新 buf 继续攒
+        buf.text = head;
+        buf.end = Math.max(buf.start, splitAt);
+        buf.dur = buf.end - buf.start;
+        flush();
+        if (tail) {
+          buf = {
+            start: c.start,
+            end: c.end,
+            dur: c.dur,
+            text: tail,
+            parts: [{ startChar: 0, endChar: tail.length, start: c.start, end: c.end }],
+          };
+        }
+        continue;
+      }
+
       // 拼到句末标点就收口；但如果这条本身是残句（I did.），
       // 它不该结束句子 —— 前一句还等着它补完谓语。
       if (buf && endsSentence(buf.text) && !isSentenceFragment(piece)) flush();
@@ -793,6 +867,16 @@
    * 排序 + 去重滚动窗口 + 计算结束时间
    * @param {boolean} bySentence 是否把碎片合并成完整句（决定翻译质量的关键开关）
    */
+  /** 不合并时的出口：仍然要过滤 [Music] 这类非语音标记 */
+  function stripAll(cues) {
+    const out = [];
+    for (const c of cues) {
+      const t = stripNonSpeech(c.text);
+      if (t) out.push(Object.assign({}, c, { text: t }));
+    }
+    return out;
+  }
+
   function finalizeCues(cues, bySentence) {
     if (!cues.length) return [];
     cues.sort((a, b) => a.start - b.start);
@@ -825,9 +909,14 @@
 
     // 合并成完整句：这是翻译质量的关键。
     // 关掉时退回「一条碎片一条字幕」，方便对比和排查。
-    const maxChars = config.mergeMaxChars || 160;
-    const maxGapMs = config.mergeMaxGapMs || 1200;
-    if (!bySentence) return deduped;
+    const maxChars = config.mergeMaxChars || 2500;
+    const maxGapMs = config.mergeMaxGapMs || 2500;
+
+    // bySentence 只在明确为 false 时才关闭。
+    // 之前写的是 if (!bySentence)，导致调用方漏传参数（undefined）
+    // 时会静默退回「不合并」，连带把 stripNonSpeech 也跳过了，
+    // 于是 [音乐] 这类标记漏到画面上。
+    if (bySentence === false) return stripAll(deduped);
     return mergeCuesToSentences(deduped, maxChars, maxGapMs);
   }
 
@@ -1318,7 +1407,12 @@
         text = (win.innerText || win.textContent || "").replace(/\s+/g, " ").trim();
       }
       // 只保留 ">>" 之后的最新片段（ASR 滚动字幕专用）
-      return config.domKeepLatest ? pickLatestSegment(text) : text;
+      if (config.domKeepLatest) text = pickLatestSegment(text);
+      // 同样要过滤 [Music]/[音乐] 这类非语音标记，
+      // 否则 DOM 实时模式会把 "[音乐]" 一起翻出来显示。
+      // 过滤后为空（整条只有音乐标记）时返回空串，
+      // checkDomCaption 会把它当成「字幕消失」处理。
+      return stripNonSpeech(text);
     } catch (e) {
       return "";
     }
