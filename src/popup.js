@@ -8,7 +8,7 @@ const DEFAULTS = {
   translator: "ai",
   aiBaseUrl: "http://localhost:8788/v1",
   aiApiKey: "",
-  aiModel: "opencode/big-pickle",
+  aiModel: "agent2/auto",
   fontFamily: "common",
   mergeBySentence: true,
   mergeMaxChars: 160,
@@ -34,6 +34,42 @@ const DEFAULTS = {
 
 /** 手动输入模型 ID 时下拉框用的特殊值 */
 const AI_MODEL_CUSTOM = "custom";
+
+/**
+ * 一次性迁移用的「旧默认 / 已不可用」模型列表。
+ *
+ * 只认这些值本身——存了别的模型的用户不受影响（与下面 originalColor /
+ * translatedColor 的迁移同规则："只认旧默认值"）。
+ *
+ * 实测（2026-10，opencode 2.0.29）：
+ *  - exo-free、ling-3.0-flash-fin-free、ling-3.1-flash-free 已从 opencode 下线；
+ *  - cat-jam-free、muse-spark-1.x-contributor-free 返回 RegionError 地区不可用；
+ *  - big-pickle 仍可用，但实测 29.1s，已被新的顶配默认（2.2s）取代。
+ *
+ * 用独立的 __modelMigrated 标记做一次性迁移：否则用户手动把模型改回
+ * big-pickle 后，每次打开面板又会被迁走。
+ */
+const SUPERSEDED_MODELS = [
+  "opencode/big-pickle",
+  "opencode/exo-free",
+  "opencode/ling-3.0-flash-fin-free",
+  "opencode/ling-3.1-flash-free",
+  "opencode/cat-jam-free",
+  "opencode/muse-spark-1.2-contributor-free",
+  "opencode/muse-spark-1.3-contributor-free",
+];
+const MODEL_MIGRATION_KEY = "__modelMigrated";
+
+/**
+ * agent2 网关上线（2026-10）的一次性迁移：旧默认 opencode/space-bunny-free
+ * → agent2/auto 智能模式（优先 GLM-5.3-Flash，挂了自动换，见 bridge/server.mjs）。
+ *
+ * 用独立标记而不是塞进 SUPERSEDED_MODELS：__modelMigrated 标记对老用户多半
+ * 已经置位，那里加值不会再跑；独立标记保证这次迁移一定执行一次。
+ * 只认旧默认值本身——手动选过别的模型的用户不受影响。
+ */
+const OLD_DEFAULT_MODEL = "opencode/space-bunny-free";
+const AGENT2_MIGRATION_KEY = "__modelMigratedAgent2";
 
 /** 常用色：三处颜色（原文/译文/背景）共用这 8 个，一键点选 */
 const COMMON_COLORS = [
@@ -90,12 +126,34 @@ async function init() {
     else el.value = stored[key];
   });
 
+  // 旧默认 / 已下架模型 → 一次性迁到新的顶配默认（别停在慢的或跑不通的模型上）
+  if (!stored[MODEL_MIGRATION_KEY]) {
+    if (SUPERSEDED_MODELS.includes(stored.aiModel)) {
+      stored.aiModel = DEFAULTS.aiModel;
+      $("aiModel").value = DEFAULTS.aiModel;
+      $("aiModelCustom").value = "";
+      save({ aiModel: DEFAULTS.aiModel });
+    }
+    save({ [MODEL_MIGRATION_KEY]: true });
+  }
+
   // 存过的模型不在下拉里（历史手输值）→ 落到 custom 并回填
   if (!modelOptionExists(stored.aiModel)) {
     $("aiModel").value = AI_MODEL_CUSTOM;
     $("aiModelCustom").value = stored.aiModel || "";
   }
   updateModelCustomVisibility();
+
+  // agent2 网关上线：停在旧默认（opencode/space-bunny-free）的一次性迁到智能模式
+  if (!stored[AGENT2_MIGRATION_KEY]) {
+    if (stored.aiModel === OLD_DEFAULT_MODEL) {
+      stored.aiModel = DEFAULTS.aiModel;
+      $("aiModel").value = DEFAULTS.aiModel;
+      $("aiModelCustom").value = "";
+      save({ aiModel: DEFAULTS.aiModel });
+    }
+    save({ [AGENT2_MIGRATION_KEY]: true });
+  }
 
   // 颜色加鲜迁移（与 content.js loadConfig 同规则）：只认旧默认值
   if (stored.originalColor === "#39ff6a" || stored.translatedColor === "#ffe14d") {
@@ -111,6 +169,11 @@ async function init() {
   updateAiBox();
   updateLabels();
   bindEvents();
+
+  $("openPlayerBtn").addEventListener("click", () => {
+    const url = chrome.runtime.getURL("src/player.html");
+    chrome.tabs.create({ url });
+  });
 }
 
 function showFatal(e) {
@@ -368,10 +431,23 @@ function bindEvents() {
         if (chrome.runtime.lastError) return showStatusMsg("请在 YouTube 视频页使用", true);
         if (res) {
           let msg = "已加载 " + res.loaded + " 条 / 已翻译 " + res.translated + " 条";
-          if (res.source) msg += "（来源 " + res.source + "）";
+          // 翻译来源拆分：AI 覆盖了几条、Google 打底几条，一眼看出混合进度
+          if (typeof res.ai === "number" || typeof res.google === "number") {
+            msg += "（AI " + (res.ai || 0) + "，Google " + (res.google || 0) + "）";
+          }
+          if (res.source) msg += "（轨道来源 " + res.source + "）";
+          // 当前句来源：眼前这句是谁翻的（只显示一次，避免重复）
           if (typeof res.videoTimeMs === "number" && res.loaded) {
             msg += " / 播放 " + Math.round(res.videoTimeMs / 1000) + "s";
-            msg += res.cueIdx >= 0 ? " 当前第 " + (res.cueIdx + 1) + " 条" : " 当前无字幕（间奏或空档）";
+            if (res.cueIdx >= 0) {
+              const srcLabel = res.currentSource === "ai" ? "AI" : res.currentSource === "google" ? "Google" : "未翻译";
+              msg += " 当前第 " + (res.cueIdx + 1) + " 条：" + srcLabel;
+            } else {
+              msg += " 当前无字幕（间奏或空档）";
+            }
+          } else if (typeof res.currentIdx === "number" && res.currentIdx >= 0) {
+            const srcLabel = res.currentSource === "ai" ? "AI" : res.currentSource === "google" ? "Google" : "未翻译";
+            msg += " / 当前第 " + (res.currentIdx + 1) + " 句：" + srcLabel;
           }
           if (res.enabled === false) msg += " 【扩展被关掉】";
           if (res.isAdPlaying) msg += " 【检测到广告，字幕暂停】";

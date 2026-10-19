@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>本地视频双语字幕</title>
+    <link rel="stylesheet" href="player.css" />
+  </head>
+  <body>
+    <header>
+      <h1>本地视频双语字幕</h1>
+      <span class="badge">离线翻译</span>
+      <div class="header-right">
+        <select id="targetLang" title="目标语言"></select>
+        <select id="translator" title="翻译引擎">
+          <option value="ai">AI 翻译</option>
+          <option value="google">Google 免费</option>
+        </select>
+        <button id="exportBtn" disabled>导出双语字幕</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- 拖放落地区 -->
+      <div id="drop-zone">
+        <div class="drop-icon">🎬</div>
+        <h2>拖入本地视频开始</h2>
+        <p>
+          支持 MP4、MKV、WebM 等常见格式。<br />
+          同时拖入 <strong>SRT / VTT</strong> 字幕文件可直接翻译；<br />
+          没有字幕文件时，载入视频后点 <strong>🎤 识别字幕</strong> 自动生成。
+        </p>
+        <div class="drop-actions">
+          <button class="primary" id="pickVideoBtn">选择视频文件</button>
+          <button id="pickSubBtn">选择字幕文件（SRT/VTT）</button>
+        </div>
+      </div>
+
+      <!-- 播放器区域 -->
+      <div id="player-area">
+        <div class="player-and-panel">
+          <div class="video-wrap">
+            <video id="video" controls></video>
+            <div id="subtitle-overlay">
+              <div class="sub-box">
+                <div class="sub-original" id="sub-orig"></div>
+                <div class="sub-translated" id="sub-tran"></div>
+              </div>
+            </div>
+          </div>
+          <!-- 字幕列表侧边栏 -->
+          <div id="sub-panel">
+            <div class="sub-panel-header">
+              <span>字幕列表</span>
+              <button id="addSubBtn" style="padding:2px 8px;font-size:11px;">+ 加载字幕</button>
+            </div>
+            <div id="sub-list">
+              <div class="no-sub-hint">暂无字幕<br/>点右上角「加载字幕」添加 SRT/VTT 文件</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="progress-wrap" id="progress-wrap">
+          <div id="progress-bg">
+            <div id="progress-fill"></div>
+            <div id="progress-thumb"></div>
+          </div>
+        </div>
+        <div class="time-row">
+          <span id="time-cur">0:00</span>
+          <span id="time-dur">0:00</span>
+        </div>
+
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <span id="file-info">未选择文件</span>
+            <span id="translate-status"></span>
+          </div>
+          <div class="toolbar-right">
+            <button id="changeVideoBtn">换视频</button>
+            <button id="asrBtn" disabled title="用本机 whisper.cpp 识别语音生成字幕，再交给翻译模型翻译">🎤 识别字幕</button>
+            <button id="togglePanelBtn">字幕列表</button>
+            <button id="translateBtn" class="primary" disabled>翻译字幕</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- 隐藏的文件选择器 -->
+    <input type="file" id="videoInput" accept="video/*" style="display:none" />
+    <input type="file" id="subInput" accept=".srt,.vtt,.ass" style="display:none" />
+
+    <script src="player.js"></script>
+  </body>
+</html>

@@ -22,10 +22,11 @@
     // google = 免费端点，秒回但质量一般
     // ai     = 混合模式：Google 打底秒出 + 本地 LLM（8788）逐步覆盖，质量最高
     translator: "ai",
-    // AI（OpenAI 兼容接口，默认指向本地 bridge）
+    // AI（OpenAI 兼容接口，默认指向本地 bridge；agent2/ 前缀走 Agent2API 网关，
+    // agent2/auto = 智能模式：按优先级试，哪个能用用哪个，见 bridge/server.mjs）
     aiBaseUrl: "http://localhost:8788/v1",
     aiApiKey: "",
-    aiModel: "opencode/big-pickle",
+    aiModel: "agent2/auto",
     // 样式
     // 字体：只存 key，实际字体栈见 FONT_STACKS
     fontFamily: "common",
@@ -99,6 +100,9 @@
   let originalEl = null;
   let translatedEl = null;
   let statusEl = null;
+  // 当前句翻译来源小标：平时隐藏，鼠标靠近字幕才显示（复用 ytbs-show-controls）。
+  // 纯展示用 pointer-events:none，不挡视频点击。
+  let sourceBadge = null;
 
   let lastIndex = -1;
   // 逐字揭示用：记录上一帧显示到第几个字符，避免无谓重排
@@ -176,6 +180,12 @@
           {
             loaded: cueList.length,
             translated: countTranslated(),
+            // 翻译来源拆分：AI 覆盖了几条、Google 打底几条（设置菜单里看全局进度用）
+            ai: countSource("ai"),
+            google: countSource("google"),
+            // 当前句来源：设置菜单里看“眼前这句是谁翻的”用
+            currentIdx: lastIndex,
+            currentSource: cueList[lastIndex] ? currentSourceOf(cueList[lastIndex].text) : "",
             videoId: currentVideoId,
             source: lastSource,
             error: lastError,
@@ -1933,8 +1943,15 @@
     statusEl.id = "ytbs-status";
     statusEl.style.display = "none";
 
+    // 翻译来源小标：平时 CSS 里 opacity:0，只有鼠标靠近字幕
+    // （wrapper 挂上 .ytbs-show-controls）才显示，不常驻挡画面。
+    sourceBadge = document.createElement("div");
+    sourceBadge.id = "ytbs-source";
+    sourceBadge.style.display = "none";
+
     box.appendChild(handle);
     box.appendChild(downloadBtn);
+    box.appendChild(sourceBadge);
     box.appendChild(originalEl);
     box.appendChild(translatedEl);
     box.appendChild(statusEl);
@@ -2405,6 +2422,7 @@
     if (idx < 0 || !cueList[idx]) {
       originalEl.textContent = "";
       translatedEl.textContent = "";
+      if (sourceBadge) sourceBadge.style.display = "none";
       if (!force) box.style.visibility = "hidden";
       box.style.visibility = "hidden";
       return;
@@ -2412,6 +2430,10 @@
     box.style.visibility = "visible";
     const cue = cueList[idx];
     const tr = pickTr(cue.text);
+    // 当前句翻译来源：字幕悬停小标 + 悬停 tooltip 用（不常驻显示）。
+    // 字幕层 pointer-events:none 所以 title  tooltip 实际靠小标展示，
+    // 这里同时写 title 是给调试/无障碍留的。
+    updateSourceBadge(cue.text, tr);
 
     // 长句自适应缩字号：**先用整句量高**（高度是这条字幕的固定值，
     // 用整句量才不会随揭示进度抖，也能保证任何时刻都不超限），
@@ -2510,6 +2532,34 @@
         }
       }
     }
+  }
+
+  /**
+   * 更新当前句来源小标。逻辑：
+   *   - 没译文：藏起小标（显示 "…" 时不误导）
+   *   - 有译文：小标 text 为 "AI"/"G"，颜色类区分，title 写全称+模型
+   *     （实际可见性由 CSS 控制：平时透明，鼠标靠近字幕才显示）
+   */
+  function updateSourceBadge(text, tr) {
+    if (!sourceBadge || !translatedEl || !box) return;
+    const src = tr ? currentSourceOf(text) : "";
+    if (!src) {
+      sourceBadge.style.display = "none";
+      translatedEl.title = "";
+      box.title = "";
+      return;
+    }
+    const isAi = src === "ai";
+    sourceBadge.style.display = "";
+    sourceBadge.textContent = isAi ? "AI" : "G";
+    sourceBadge.classList.toggle("ytbs-source-ai", isAi);
+    sourceBadge.classList.toggle("ytbs-source-google", !isAi);
+    const tip = isAi
+      ? "当前译文：AI 优化（" + (config.aiModel || "") + "），Google 打底已覆盖"
+      : "当前译文：Google 免费端点（AI 还没覆盖到这句）";
+    sourceBadge.title = tip;
+    translatedEl.title = tip;
+    box.title = "";
   }
 
   // ============================== 广告检测 ==============================
@@ -2655,6 +2705,24 @@
     return n;
   }
 
+  // 按翻译来源计数（设置菜单展示用）。注意与 pickTr 保持同一口径：
+  // 纯 google 模式下 AI 条目不可见，不计入。
+  function countSource(src) {
+    let n = 0;
+    for (const c of cueList) {
+      if (currentSourceOf(c.text) === src) n++;
+    }
+    return n;
+  }
+
+  // 当前实际显示的译文是谁翻的："" = 还没译文，"ai"/"google" = 来源。
+  function currentSourceOf(text) {
+    const e = getEntry(text);
+    if (!e) return "";
+    if (!isHybrid() && e.s === "ai") return "";
+    return e.s || "";
+  }
+
   function exportSubtitles(format, mode) {
     if (!cueList.length) {
       return { ok: false, error: "字幕尚未加载完成，请稍候重试" };
@@ -2759,6 +2827,7 @@
     originalEl = null;
     translatedEl = null;
     statusEl = null;
+    sourceBadge = null;
     applyNativeVisibility();
   }
 

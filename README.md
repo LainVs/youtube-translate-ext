@@ -123,7 +123,8 @@ youtube-translate-ext/
   `opencode/big-pickle`）在 HTTP `POST /api/experimental/generate` 上会被拒
   （"free tier can only be used from within OpenCode"），但命令行 `opencode run` 属于内部调用，可用。
   详见 [bridge/README.md](bridge/README.md)。AI 引擎的默认配置即为
-  `http://localhost:8788/v1` + `opencode/big-pickle`。
+  `http://localhost:8788/v1` + `agent2/auto`（智能模式：模型前缀 `agent2/` 走本机
+  Agent2API 网关，按优先级逐个试，哪个能用用哪个；失败自动冷却换下一个）。
 
 ## 持久化翻译缓存
 
