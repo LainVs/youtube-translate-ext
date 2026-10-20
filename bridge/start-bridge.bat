@@ -39,6 +39,8 @@ echo.
 echo   - Uses local OpenCode model, no paid quota consumed
 echo   - Keep this window OPEN while translating subtitles
 echo   - Press Ctrl+C to stop
+echo   - Tired of manual start? Run install-autostart.bat once
+echo     (auto-start hidden on login, auto-restart on crash)
 echo.
 
 node server.mjs

@@ -6,3 +6,7 @@ Thumbs.db
 # whisper.cpp 二进制和模型：体积大且可从官方源重新下载
 # 装好后用 GET /asr/status 确认可用即可
 bridge/whisper/
+
+# 桥的运行时日志与守护停止标记
+bridge/bridge.log
+bridge/.supervisor-stop

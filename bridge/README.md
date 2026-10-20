@@ -41,6 +41,23 @@ npm start          # 默认监听 http://localhost:8788
 > 无需 `npm install`：本服务不使用任何第三方包。
 > 依赖的是已经安装好的 OpenCode（命令行 `opencode`，或桌面版自带的 CLI）。
 
+## 开机自启（推荐，装一次就不用管了）
+
+双击一次 **`install-autostart.bat`**：
+
+- 在 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` 写入
+  `yt-subtitle-bridge.vbs`，登录 Windows 时以**隐藏窗口**拉起桥，平时看不到任何窗口
+- 守护脚本 `autostart-supervisor.bat` 会在桥异常退出后 5 秒自动重启
+- 日志追加到 `bridge/bridge.log`（超过 5MB 自动清空；该文件不入库）
+- 安装脚本会顺便做一次健康检查，失败会提示看日志
+
+取消：双击 **`uninstall-autostart.bat`**（删启动项 + 停桥）。
+临时手动启动仍然可以用 `start-bridge.bat` 或 `npm start`（检测到 8788
+已被自启实例占用时会提示并退出，不会打架）。
+
+> 注意：启动项里写的是本目录的绝对路径。如果移动了项目文件夹，
+> 重新双击一次 `install-autostart.bat` 即可。
+
 ## 在扩展里配置
 
 设置面板 → 翻译引擎选「AI 翻译」：
