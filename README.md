@@ -1,5 +1,9 @@
 # YouTube 双语字幕翻译（复刻版）
 
+![双语字幕效果](docs/screenshot.png)
+
+> 实机效果：原文（绿）+ AI 译文（黄）双层自渲染字幕，右上角显示 AI 覆盖进度
+
 > 仓库：<https://github.com/LainVs/youtube-translate-ext>（私有）
 
 复刻“快捷翻译”一类 Chrome 扩展的 **YouTube 字幕翻译** 功能：
