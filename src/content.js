@@ -1615,11 +1615,10 @@
     return n;
   }
 
+  // 状态行不再自己管显隐：默认透明，靠 #ytbs-wrapper.ytbs-show-controls
+  // （鼠标靠近字幕）显形。这里只更新文字，显示与否交给 CSS。
   function setStatus(s) {
-    if (statusEl) {
-      statusEl.textContent = s;
-      statusEl.style.display = "";
-    }
+    if (statusEl) statusEl.textContent = s;
   }
 
   function finishStatus(texts, phase, stillN) {
@@ -1632,9 +1631,6 @@
         ? "AI 覆盖 " + n + "/" + texts.length + "，其余 Google 显示"
         : "AI 覆盖 " + n + "/" + texts.length;
     }
-    setTimeout(() => {
-      if (statusEl) statusEl.style.display = "none";
-    }, 1500);
   }
 
   // 失败自愈：整轮颗粒无收说明桥接/网络挂了，硬刷完 16 个 chunk
@@ -1939,9 +1935,10 @@
     translatedEl = document.createElement("div");
     translatedEl.className = "ytbs-line ytbs-translated";
 
+    // 状态行：默认透明（CSS opacity:0），鼠标靠近字幕才显形；不设 display:none，
+    // 否则 CSS 的 opacity 开关就失效了。
     statusEl = document.createElement("div");
     statusEl.id = "ytbs-status";
-    statusEl.style.display = "none";
 
     // 翻译来源小标：平时 CSS 里 opacity:0，只有鼠标靠近字幕
     // （wrapper 挂上 .ytbs-show-controls）才显示，不常驻挡画面。
@@ -2060,8 +2057,8 @@
     const maxH = Math.max(100, Math.round(ph * 0.42));
     const pad = (isFinite(Number(config.boxPadding)) ? Number(config.boxPadding) : 10) * 2;
     // 只量**两行字幕本身**，不要用 box.offsetHeight：
-    //   - #ytbs-status 的「翻译中… 0/N」也在 box 里，量进去会多缩一截，
-    //     而 status 很快就消失了，字号却不会自己变回来
+    //   - #ytbs-status（「翻译中… 0/N」）是绝对定位挂在框上方，本来就不占流，
+    //     但用 box.offsetHeight 仍会把 padding 之类算进去多缩一截
     //   - 广告期间 box 是 display:none，两行都是 0，这时去量会记下错误基准
     const LINE_GAP = 4; // 与 content.css 的 gap 保持一致
     const lineH = () => originalEl.offsetHeight + translatedEl.offsetHeight + LINE_GAP;

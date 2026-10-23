@@ -10,3 +10,9 @@ bridge/whisper/
 # 妗ョ殑杩愯鏃舵棩蹇椾笌瀹堟姢鍋滄鏍囪
 bridge/bridge.log
 bridge/.supervisor-stop
+
+# 调研用的第三方竞品源码与本地网关文件：版权原因不入库（FINDINGS.md 笔记保留）
+research/orange2ai_*
+research/outhsics_*
+research/wangruofeng_*
+research/*.json

@@ -156,12 +156,29 @@
   font-weight: 400;
 }
 
+/* 翻译状态行（「AI 覆盖 x/y」「Google 打底…」这类）：
+   默认透明不挡画面，鼠标靠近字幕（.ytbs-show-controls）才显形，
+   和把手/来源小标同一套悬停逻辑。 */
 #ytbs-status {
-  margin-top: 4px;
+  /* 绝对定位挂在字幕框上方：不占盒内布局，
+     透明时不挤压字幕高度，也不会让半透明底色多出一截。 */
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 4px;
+  white-space: nowrap;
   font-size: 12px;
   color: #9be89b;
-  opacity: 0.85;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
   font-family: system-ui, sans-serif;
+}
+
+#ytbs-wrapper.ytbs-show-controls #ytbs-status {
+  opacity: 0.9;
 }
 
 /* 页面内提示条：字幕轨道缺失 / 拉取失败 / 翻译失败 等 */
